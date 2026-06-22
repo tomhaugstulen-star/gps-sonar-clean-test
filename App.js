@@ -68,29 +68,14 @@ function first(obj, keys) {
   return null;
 }
 
-function averageLonLat(points) {
-  let count = 0;
-  let sx = 0;
-  let sy = 0;
-  for (const p of points) {
-    if (!Array.isArray(p) || p.length < 2) continue;
-    const lon = Number(p[0]);
-    const lat = Number(p[1]);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-    sx += lon;
-    sy += lat;
-    count += 1;
-  }
-  if (!count) return null;
-  return { longitude: sx / count, latitude: sy / count };
-}
-
 function collectCoordinates(geometry) {
   const out = [];
   function walk(value) {
     if (!Array.isArray(value)) return;
     if (typeof value[0] === "number" && typeof value[1] === "number") {
-      out.push(value);
+      const lon = Number(value[0]);
+      const lat = Number(value[1]);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) out.push({ latitude: lat, longitude: lon });
       return;
     }
     value.forEach(walk);
@@ -99,15 +84,35 @@ function collectCoordinates(geometry) {
   return out;
 }
 
+function averagePoint(points) {
+  if (!points.length) return null;
+  const sum = points.reduce((acc, p) => ({ latitude: acc.latitude + p.latitude, longitude: acc.longitude + p.longitude }), { latitude: 0, longitude: 0 });
+  return { latitude: sum.latitude / points.length, longitude: sum.longitude / points.length };
+}
+
+function nearestGeometryPoint(points, refLat, refLon) {
+  if (!points.length) return null;
+  let best = points[0];
+  let bestDistance = distanceM(refLat, refLon, best.latitude, best.longitude);
+  for (const point of points.slice(1)) {
+    const d = distanceM(refLat, refLon, point.latitude, point.longitude);
+    if (d < bestDistance) {
+      best = point;
+      bestDistance = d;
+    }
+  }
+  return best;
+}
+
 function featurePointInfo(feature) {
   const geometry = feature?.geometry;
   if (!geometry) return null;
-  if (geometry.type === "Point" && Array.isArray(geometry.coordinates)) {
-    return { longitude: Number(geometry.coordinates[0]), latitude: Number(geometry.coordinates[1]), method: "punkt" };
-  }
-  const averaged = averageLonLat(collectCoordinates(geometry));
-  if (!averaged) return null;
-  return { ...averaged, method: "beregnet midtpunkt" };
+  const points = collectCoordinates(geometry);
+  if (!points.length) return null;
+  if (geometry.type === "Point") return { ...points[0], method: "punkt", geometryPoints: points };
+  const center = averagePoint(points);
+  if (!center) return null;
+  return { ...center, method: "beregnet midtpunkt", geometryPoints: points };
 }
 
 function featureName(properties, fallback) {
@@ -130,6 +135,7 @@ function normalizeFeature(collection, feature, index) {
     name: featureName(properties, `${collection.label} ${index + 1}`),
     geometryType: feature.geometry?.type || "ukjent",
     coordinateMethod: point.method,
+    geometryPoints: point.geometryPoints || [],
     properties,
     latitude: point.latitude,
     longitude: point.longitude
@@ -167,7 +173,11 @@ async function scanOgcBounds(bounds, onProgress) {
 function candidatePosts(lat, lon, rawPosts) {
   const seen = new Set();
   const sorted = rawPosts
-    .map((post) => ({ ...post, distanceFromStart: distanceM(lat, lon, post.latitude, post.longitude) }))
+    .map((post) => {
+      const nearest = post.geometryType === "Point" ? null : nearestGeometryPoint(post.geometryPoints || [], lat, lon);
+      const adjusted = nearest ? { ...post, latitude: nearest.latitude, longitude: nearest.longitude, coordinateMethod: "nærmeste geometripunkt" } : post;
+      return { ...adjusted, distanceFromStart: distanceM(lat, lon, adjusted.latitude, adjusted.longitude) };
+    })
     .filter((post) => Number.isFinite(post.distanceFromStart))
     .filter((post) => post.distanceFromStart <= ROUTE_RADIUS)
     .filter((post) => {
@@ -354,12 +364,12 @@ export default function App() {
     return (
       <View style={styles.menu}>
         <Text style={styles.title}>Riksantikvaren OGC-test</Text>
-        <Text style={styles.menuText}>Tester OGC API / GeoJSON. Lager opptil 4 poster innen 2 km og viser kandidat-debug.</Text>
+        <Text style={styles.menuText}>Tester OGC API / GeoJSON. Polygoner bruker nå nærmeste geometripunkt mot GPS.</Text>
         {loading ? <ActivityIndicator size="large" color="#FFFFFF" /> : null}
         <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} />
         <TouchableOpacity style={styles.mainButton} onPress={startOgcTest} disabled={loading}>
           <Text style={styles.buttonTitle}>START 4-POSTERS RUTE</Text>
-          <Text style={styles.buttonText}>GPS → større bbox → kandidat-debug</Text>
+          <Text style={styles.buttonText}>GPS → bbox → nærmeste geometripunkt</Text>
         </TouchableOpacity>
       </View>
     );
