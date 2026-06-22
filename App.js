@@ -169,21 +169,27 @@ export default function App() {
     audioIntervalRef.current = setTimeout(loop, 1000);
   };
 
-  // SKJERMVISNINGER
+  // 1. STARTSKJERM (HOMESCREEN) MED TO VALG
   if (screen === 'MENU') {
     return (
-      <View style={styles.container}>
-        <Text style={styles.title}>Modus-tester</Text>
-        <TouchableOpacity style={[styles.btn, {backgroundColor: '#3B82F6'}]} onPress={startRebus}>
-          <Text style={styles.btnText}>REBUS MODUS (2km)</Text>
+      <View style={styles.menuContainer}>
+        <Text style={styles.menuTitle}>📍 Spillvelger</Text>
+        <Text style={styles.menuSubtitle}>Velg modusen du vil teste utendørs:</Text>
+        
+        <TouchableOpacity style={[styles.menuBtn, {backgroundColor: '#3B82F6'}]} onPress={startRebus}>
+          <Text style={styles.menuBtnTitle}>REBUS MODUS</Text>
+          <Text style={styles.menuBtnDesc}>2 km radius • 2 poster</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.btn, {backgroundColor: '#10B981', marginTop: 20}]} onPress={startSonar}>
-          <Text style={styles.btnText}>BARN MODUS (Sonar/Gyro)</Text>
+        
+        <TouchableOpacity style={[styles.menuBtn, {backgroundColor: '#10B981', marginTop: 20}]} onPress={startSonar}>
+          <Text style={styles.menuBtnTitle}>BARN SONAR</Text>
+          <Text style={styles.menuBtnDesc}>40m diameter • 3 skatter • Gyro</Text>
         </TouchableOpacity>
       </View>
     );
   }
 
+  // 2. SPILLSKJERMER (REBUS ELLER SONAR)
   const remainingSonar = sonarTreasures.filter(t => !t.found).length;
 
   return (
@@ -206,20 +212,27 @@ export default function App() {
       </View>
 
       <TouchableOpacity style={styles.backBtn} onPress={() => setScreen('MENU')}>
-        <Text style={styles.backBtnText}>Avslutt test</Text>
+        <Text style={styles.backBtnText}>Tilbake til hovedmeny</Text>
       </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0F172A', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  // Startsiden-stiler
+  menuContainer: { flex: 1, backgroundColor: '#0F172A', justifyContent: 'center', alignItems: 'center', padding: 25 },
+  menuTitle: { fontSize: 36, fontWeight: 'bold', color: '#fff', marginBottom: 10 },
+  menuSubtitle: { fontSize: 16, color: '#94A3B8', marginBottom: 40, textAlign: 'center' },
+  menuBtn: { width: '100%', paddingVertical: 25, paddingHorizontal: 20, borderRadius: 16, alignItems: 'center', elevation: 5, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5 },
+  menuBtnTitle: { color: '#fff', fontSize: 22, fontWeight: 'bold', letterSpacing: 1 },
+  menuBtnDesc: { color: 'rgba(255, 255, 255, 0.8)', fontSize: 14, marginTop: 5 },
+  
+  // Spillskjerm-stiler
+  container: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   title: { fontSize: 32, fontWeight: 'bold', color: '#fff', marginBottom: 40 },
-  btn: { width: '100%', paddingVertical: 20, borderRadius: 15, alignItems: 'center', elevation: 5 },
-  btnText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  card: { backgroundColor: '#fff', padding: 30, borderRadius: 20, width: '100%', alignItems: 'center', minHeight: 150, justifyContent: 'center' },
-  infoText: { fontSize: 20, fontWeight: '600', color: '#1F2937', textAlign: 'center' },
-  gyroHint: { fontSize: 22, fontWeight: 'bold', marginTop: 15 },
-  backBtn: { marginTop: 40, borderBottomWidth: 1, borderBottomColor: '#94A3B8' },
-  backBtnText: { color: '#94A3B8', fontSize: 16 }
-});
+  card: { backgroundColor: '#fff', padding: 30, borderRadius: 20, width: '100%', alignItems: 'center', minHeight: 160, justifyContent: 'center', elevation: 8 },
+  infoText: { fontSize: 22, fontWeight: '600', color: '#1F2937', textAlign: 'center', lineHeight: 30 },
+  gyroHint: { fontSize: 24, fontWeight: 'bold', marginTop: 15 },
+  backBtn: { marginTop: 50, borderBottomWidth: 1, borderBottomColor: '#94A3B8', paddingBottom: 5 },
+  backBtnText: { color: '#94A3B8', fontSize: 16, fontWeight: '500' }
+}); // <-- Pass på at denne parentesen og semikolonet er med her!

@@ -1,27 +1,42 @@
 {
   "expo": {
-    "name": "gps-test-clean",
-    "slug": "gps-test-clean",
+    "name": "GPS og Gyro Test",
+    "slug": "gps-gyro-test",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-image.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.dittnavn.gpsgyrotest",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Appen trenger GPS for å måle avstanden til postene og skattene.",
+        "NSMotionUsageDescription": "Appen trenger tilgang til kompass og gyro for å registrere hvilken retning du peker telefonen."
+      }
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.dittnavn.gpsgyrotest"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-audio"
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Tillat at appen bruker GPS for å finne skatter når den er åpen."
+        }
+      ]
     ]
   }
 }
