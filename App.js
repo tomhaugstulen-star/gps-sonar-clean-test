@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   Alert,
   Linking,
   SafeAreaView,
@@ -32,7 +31,7 @@ const TEST_ROUTE = {
       id: "post-1",
       title: "Post 1",
       latitude: 59.91095,
-      longitude: 10.75320,
+      longitude: 10.7532,
       radius: 35,
       hint: "Gå til første testpunkt.",
       question: "Hva ser du ved første post?",
@@ -52,7 +51,7 @@ const TEST_ROUTE = {
       id: "post-3",
       title: "Post 3",
       latitude: 59.91095,
-      longitude: 10.75450,
+      longitude: 10.7545,
       radius: 35,
       hint: "Du nærmer deg tredje punkt.",
       question: "Hvilket bygg eller landemerke er nærmest?",
@@ -209,15 +208,23 @@ export default function App() {
           return;
         }
 
-        setStatus("GPS aktiv.");
+        setStatus("GPS aktiv. Venter på posisjon...");
 
-        const firstFix = await Location.getCurrentPositionAsync({
+        Location.getCurrentPositionAsync({
           accuracy: Location.Accuracy.High,
-        });
-
-        if (mounted) {
-          setLocation(firstFix);
-        }
+        })
+          .then((firstFix) => {
+            if (mounted) {
+              setLocation(firstFix);
+              setStatus("GPS aktiv.");
+            }
+          })
+          .catch((error) => {
+            console.log("Første GPS-posisjon feilet:", error?.message || error);
+            if (mounted) {
+              setStatus("Kart vises. Venter fortsatt på GPS-posisjon.");
+            }
+          });
 
         gpsSub = await Location.watchPositionAsync(
           {
@@ -228,13 +235,14 @@ export default function App() {
           (next) => {
             if (mounted) {
               setLocation(next);
+              setStatus("GPS aktiv.");
             }
           }
         );
       } catch (error) {
         console.log("GPS-sporing feilet:", error?.message || error);
         if (mounted) {
-          setStatus("GPS-sporing feilet. Sjekk GPS-status.");
+          setStatus("Kart vises. GPS-sporing feilet. Sjekk GPS-status.");
         }
       }
     }
@@ -293,18 +301,6 @@ export default function App() {
       ? "post åpnet"
       : "gå nærmere";
 
-  if (!location && gpsStatus?.status !== "denied") {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.centered}>
-          <ActivityIndicator />
-          <Text style={styles.loadingText}>{status}</Text>
-          <Text style={styles.mutedText}>Venter på første GPS-posisjon.</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.content}>
@@ -316,8 +312,8 @@ export default function App() {
             style={styles.map}
             initialRegion={mapRegion}
             region={mapRegion}
-            showsUserLocation
-            showsMyLocationButton
+            showsUserLocation={gpsStatus?.status === "granted"}
+            showsMyLocationButton={gpsStatus?.status === "granted"}
             loadingEnabled
           >
             <Polyline coordinates={routeLine} strokeWidth={4} strokeColor="#2563eb" />
@@ -345,8 +341,8 @@ export default function App() {
             })}
           </MapView>
           <View style={styles.mapLegend}>
-            <Text style={styles.mapLegendText}>Oransje = aktiv post</Text>
-            <Text style={styles.mapLegendText}>Grønn = åpnet post</Text>
+            <Text style={styles.mapLegendText}>Kartet viser test-ruten uavhengig av GPS-fix.</Text>
+            <Text style={styles.mapLegendText}>Oransje = aktiv post. Grønn = åpnet post.</Text>
           </View>
         </View>
 
@@ -360,7 +356,7 @@ export default function App() {
           <View style={styles.card}>
             <Text style={styles.cardTitle}>GPS-tilgang mangler</Text>
             <Text style={styles.bodyText}>
-              Appen trenger posisjonstilgang for å teste Rebus-flyten.
+              Appen trenger posisjonstilgang for å teste Rebus-flyten. Kartet kan likevel vise test-ruten.
             </Text>
             <TouchableOpacity style={styles.secondaryButton} onPress={openSettings} activeOpacity={0.8}>
               <Text style={styles.secondaryButtonText}>Åpne innstillinger</Text>
@@ -457,25 +453,6 @@ const styles = StyleSheet.create({
   content: {
     padding: 20,
     gap: 14,
-  },
-  centered: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-    backgroundColor: "#101114",
-  },
-  loadingText: {
-    marginTop: 12,
-    color: "#f2f2f2",
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  mutedText: {
-    marginTop: 8,
-    color: "#9ca3af",
-    fontSize: 14,
-    textAlign: "center",
   },
   kicker: {
     color: "#9ca3af",
