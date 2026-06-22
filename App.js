@@ -151,11 +151,34 @@ function routeFrom(lat, lon, rawPosts, radius, count) {
     .map((post, index) => ({ ...post, id: `${post.source}-${index + 1}`, number: index + 1, found: false }));
 }
 
-async function askGps() {
-  const { status } = await Location.requestForegroundPermissionsAsync();
-  if (status === "granted") return true;
-  Alert.alert("GPS kreves", "Rebus-testen må ha GPS-tilgang.");
+async function ensureGpsPermission() {
+  let permission = await Location.getForegroundPermissionsAsync();
+
+  if (permission.status !== "granted") {
+    permission = await Location.requestForegroundPermissionsAsync();
+  }
+
+  if (permission.status === "granted") return true;
+
+  const message = permission.canAskAgain === false
+    ? "GPS er avslått for appen. Åpne telefonens innstillinger og tillat posisjon for appen."
+    : "Rebus-testen må ha GPS-tilgang.";
+
+  Alert.alert("GPS kreves", message);
   return false;
+}
+
+async function getGpsPosition() {
+  const allowed = await ensureGpsPermission();
+  if (!allowed) return null;
+
+  try {
+    return await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+  } catch (error) {
+    console.log("GPS-posisjon feilet:", error?.message || error);
+    Alert.alert("GPS feilet", "Klarte ikke hente GPS-posisjon. Sjekk at posisjon er slått på, og prøv ute med fri sikt.");
+    return null;
+  }
 }
 
 export default function App() {
@@ -174,14 +197,24 @@ export default function App() {
     if (screen !== "REBUS") return undefined;
     let sub;
     let mounted = true;
+
     async function watch() {
-      if (!(await askGps())) return;
-      sub = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 },
-        (next) => mounted && setLocation(next)
-      );
+      try {
+        const allowed = await ensureGpsPermission();
+        if (!allowed || !mounted) return;
+
+        sub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 },
+          (next) => mounted && setLocation(next)
+        );
+      } catch (error) {
+        console.log("GPS-sporing feilet:", error?.message || error);
+        if (mounted) setStatus("GPS-sporing feilet. Sjekk posisjonstillatelse og prøv igjen.");
+      }
     }
+
     watch();
+
     return () => {
       mounted = false;
       if (sub) sub.remove();
@@ -214,9 +247,14 @@ export default function App() {
     setActiveIndex(0);
     setStatus("Søker etter ekte poster...");
     setApiStatus(`Søkeradius: ${radiusToUse} m`);
+
     try {
-      if (!(await askGps())) return;
-      const current = existingStartPoint || (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }));
+      const current = existingStartPoint || await getGpsPosition();
+      if (!current) {
+        setStatus("GPS-tilgang mangler. Gi posisjonstillatelse og prøv igjen.");
+        return;
+      }
+
       setLocation(current);
       setStartPoint(current);
       const lat = current.coords.latitude;
@@ -242,7 +280,7 @@ export default function App() {
         else setStatus(`Fant ingen poster innen ${radiusToUse} m. Flytt deg og prøv igjen.`);
       }
     } catch (e) {
-      console.log("Rebus feilet:", e);
+      console.log("Rebus feilet:", e?.message || e);
       Alert.alert("Rebus feilet", "Sjekk GPS og nettverk.");
       setStatus("Klarte ikke starte API-test.");
     } finally {
