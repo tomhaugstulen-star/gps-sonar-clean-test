@@ -10,6 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import MapView, { Circle, Marker, Polyline } from "react-native-maps";
 import * as Location from "expo-location";
 
 /**
@@ -95,6 +96,41 @@ function formatMeters(value) {
   }
 
   return `${Math.round(value)} m`;
+}
+
+function routeCoordinates() {
+  return TEST_ROUTE.posts.map((post) => ({
+    latitude: post.latitude,
+    longitude: post.longitude,
+  }));
+}
+
+function makeRouteRegion(location) {
+  const routePoints = routeCoordinates();
+  const points = location
+    ? [
+        ...routePoints,
+        {
+          latitude: location.coords.latitude,
+          longitude: location.coords.longitude,
+        },
+      ]
+    : routePoints;
+
+  const latitudes = points.map((point) => point.latitude);
+  const longitudes = points.map((point) => point.longitude);
+
+  const minLat = Math.min(...latitudes);
+  const maxLat = Math.max(...latitudes);
+  const minLon = Math.min(...longitudes);
+  const maxLon = Math.max(...longitudes);
+
+  const latitude = (minLat + maxLat) / 2;
+  const longitude = (minLon + maxLon) / 2;
+  const latitudeDelta = Math.max((maxLat - minLat) * 2.4, 0.004);
+  const longitudeDelta = Math.max((maxLon - minLon) * 2.4, 0.004);
+
+  return { latitude, longitude, latitudeDelta, longitudeDelta };
 }
 
 async function readGpsStatus() {
@@ -222,6 +258,9 @@ export default function App() {
     );
   }, [location, activePost]);
 
+  const mapRegion = useMemo(() => makeRouteRegion(location), [location]);
+  const routeLine = useMemo(() => routeCoordinates(), []);
+
   const activePostIsOpen = !!activePost && openedPostIds.includes(activePost.id);
   const withinRadius =
     !!activePost &&
@@ -271,6 +310,45 @@ export default function App() {
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.kicker}>Rebus GPS-test</Text>
         <Text style={styles.title}>{TEST_ROUTE.name}</Text>
+
+        <View style={styles.mapCard}>
+          <MapView
+            style={styles.map}
+            initialRegion={mapRegion}
+            region={mapRegion}
+            showsUserLocation
+            showsMyLocationButton
+            loadingEnabled
+          >
+            <Polyline coordinates={routeLine} strokeWidth={4} strokeColor="#2563eb" />
+
+            {TEST_ROUTE.posts.map((post, index) => {
+              const isActive = activePost?.id === post.id;
+              const isOpened = openedPostIds.includes(post.id);
+
+              return (
+                <React.Fragment key={post.id}>
+                  <Circle
+                    center={{ latitude: post.latitude, longitude: post.longitude }}
+                    radius={post.radius}
+                    strokeColor={isActive ? "#f97316" : "#2563eb"}
+                    fillColor={isActive ? "rgba(249, 115, 22, 0.18)" : "rgba(37, 99, 235, 0.12)"}
+                  />
+                  <Marker
+                    coordinate={{ latitude: post.latitude, longitude: post.longitude }}
+                    title={`${index + 1}. ${post.title}`}
+                    description={isOpened ? "Post åpnet" : isActive ? "Aktiv post" : "Ikke åpnet"}
+                    pinColor={isOpened ? "green" : isActive ? "orange" : "red"}
+                  />
+                </React.Fragment>
+              );
+            })}
+          </MapView>
+          <View style={styles.mapLegend}>
+            <Text style={styles.mapLegendText}>Oransje = aktiv post</Text>
+            <Text style={styles.mapLegendText}>Grønn = åpnet post</Text>
+          </View>
+        </View>
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Status</Text>
@@ -411,6 +489,32 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: "800",
     marginBottom: 4,
+  },
+  mapCard: {
+    height: 320,
+    borderRadius: 16,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "#2d3340",
+    backgroundColor: "#1c1f26",
+  },
+  map: {
+    flex: 1,
+  },
+  mapLegend: {
+    position: "absolute",
+    left: 10,
+    right: 10,
+    bottom: 10,
+    backgroundColor: "rgba(16, 17, 20, 0.86)",
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  mapLegendText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "700",
   },
   card: {
     backgroundColor: "#1c1f26",
