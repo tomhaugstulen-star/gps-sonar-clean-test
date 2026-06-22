@@ -159,7 +159,7 @@ async function scanOgcBounds(bounds, onProgress) {
   return { hits: results, reports };
 }
 
-function routeFrom(lat, lon, rawPosts, count) {
+function candidatePosts(lat, lon, rawPosts) {
   const seen = new Set();
   const sorted = rawPosts
     .map((post) => ({ ...post, distanceFromStart: distanceM(lat, lon, post.latitude, post.longitude) }))
@@ -170,12 +170,28 @@ function routeFrom(lat, lon, rawPosts, count) {
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    })
-    .sort((a, b) => (a.priority - b.priority) || (a.distanceFromStart - b.distanceFromStart));
+    });
   const preferred = sorted.filter((post) => post.collectionId !== "sikringssoner");
-  return (preferred.length ? preferred : sorted)
-    .slice(0, count)
-    .map((post, index) => ({ ...post, number: index + 1, found: false }));
+  return preferred.length ? preferred : sorted;
+}
+
+function walkingRouteFrom(lat, lon, rawPosts, count) {
+  const remaining = candidatePosts(lat, lon, rawPosts);
+  const route = [];
+  let current = { latitude: lat, longitude: lon };
+
+  while (remaining.length > 0 && route.length < count) {
+    remaining.sort((a, b) => {
+      const ad = distanceM(current.latitude, current.longitude, a.latitude, a.longitude);
+      const bd = distanceM(current.latitude, current.longitude, b.latitude, b.longitude);
+      return ad - bd || a.priority - b.priority || a.distanceFromStart - b.distanceFromStart;
+    });
+    const next = remaining.shift();
+    route.push(next);
+    current = { latitude: next.latitude, longitude: next.longitude };
+  }
+
+  return route.map((post, index) => ({ ...post, number: index + 1, found: false }));
 }
 
 async function readGpsStatus() {
@@ -286,7 +302,7 @@ export default function App() {
     setPosts(route);
     setActiveIndex(0);
     setScreen("REBUS");
-    setStatus(route.length === 1 ? `1-post test klar. Gå til: ${route[0].name}` : `Rebus klar. Gå til post 1: ${route[0].name}`);
+    setStatus(route.length === 1 ? `1-post test klar. Gå til: ${route[0].name}` : `Rute klar. Gå til post 1: ${route[0].name}`);
   }
 
   async function startOgcTest() {
@@ -307,11 +323,11 @@ export default function App() {
       setApiStatus(`GPS ${round5(lat)}, ${round5(lon)}. Nøyaktighet: ${accuracy}. BBox: ${boundsText(bounds)}.`);
       const result = await scanOgcBounds(bounds, setStatus);
       setReports(result.reports);
-      const route = routeFrom(lat, lon, result.hits, ROUTE_COUNT);
-      const useful = routeFrom(lat, lon, result.hits, 99);
+      const route = walkingRouteFrom(lat, lon, result.hits, ROUTE_COUNT);
+      const useful = candidatePosts(lat, lon, result.hits);
       const collectionsWithHits = result.reports.filter((r) => r.raw > 0);
       const fallbackUsed = useful.length > 0 && useful.every((post) => post.collectionId === "sikringssoner");
-      setApiStatus(`OGC samlinger: ${result.reports.length}. Samlinger med treff: ${collectionsWithHits.length}. Rå treff: ${result.hits.length}. Innen 2 km: ${useful.length}. ${fallbackUsed ? "Fallback: sikringssoner." : "Prioriterer lokaliteter/enkeltminner."}`);
+      setApiStatus(`OGC samlinger: ${result.reports.length}. Samlinger med treff: ${collectionsWithHits.length}. Rå treff: ${result.hits.length}. Innen 2 km: ${useful.length}. Rute: nærmeste neste post. ${fallbackUsed ? "Fallback: sikringssoner." : "Bruker lokaliteter/enkeltminner."}`);
       if (route.length > 0) { startWithRoute(route); return; }
       setStatus("Ingen OGC-treff innen 2 km. Se rapport under.");
     } catch (error) {
@@ -329,12 +345,12 @@ export default function App() {
     return (
       <View style={styles.menu}>
         <Text style={styles.title}>Riksantikvaren OGC-test</Text>
-        <Text style={styles.menuText}>Tester OGC API / GeoJSON. Lager opptil 4 poster innen 2 km. Sikringssoner brukes bare som fallback.</Text>
+        <Text style={styles.menuText}>Tester OGC API / GeoJSON. Lager opptil 4 poster innen 2 km og sorterer dem som en enkel gåtur.</Text>
         {loading ? <ActivityIndicator size="large" color="#FFFFFF" /> : null}
         <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} />
         <TouchableOpacity style={styles.mainButton} onPress={startOgcTest} disabled={loading}>
           <Text style={styles.buttonTitle}>START 4-POSTERS RUTE</Text>
-          <Text style={styles.buttonText}>GPS → større bbox → opptil 4 poster innen 2 km</Text>
+          <Text style={styles.buttonText}>GPS → større bbox → nærmeste neste post</Text>
         </TouchableOpacity>
       </View>
     );
