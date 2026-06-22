@@ -12,6 +12,7 @@ const BOUNDS_DELTA = 0.018;
 const FOUND_RADIUS = 40;
 const ROUTE_RADIUS = 2000;
 const ROUTE_COUNT = 4;
+const DEBUG_COUNT = 12;
 
 const toRad = (v) => (v * Math.PI) / 180;
 const toDeg = (v) => (v * 180) / Math.PI;
@@ -98,13 +99,15 @@ function collectCoordinates(geometry) {
   return out;
 }
 
-function featurePoint(feature) {
+function featurePointInfo(feature) {
   const geometry = feature?.geometry;
   if (!geometry) return null;
   if (geometry.type === "Point" && Array.isArray(geometry.coordinates)) {
-    return { longitude: Number(geometry.coordinates[0]), latitude: Number(geometry.coordinates[1]) };
+    return { longitude: Number(geometry.coordinates[0]), latitude: Number(geometry.coordinates[1]), method: "punkt" };
   }
-  return averageLonLat(collectCoordinates(geometry));
+  const averaged = averageLonLat(collectCoordinates(geometry));
+  if (!averaged) return null;
+  return { ...averaged, method: "beregnet midtpunkt" };
 }
 
 function featureName(properties, fallback) {
@@ -115,7 +118,7 @@ function featureName(properties, fallback) {
 }
 
 function normalizeFeature(collection, feature, index) {
-  const point = featurePoint(feature);
+  const point = featurePointInfo(feature);
   if (!point || !Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)) return null;
   const properties = feature.properties || {};
   return {
@@ -125,6 +128,8 @@ function normalizeFeature(collection, feature, index) {
     priority: collection.priority,
     source: "Riksantikvaren OGC",
     name: featureName(properties, `${collection.label} ${index + 1}`),
+    geometryType: feature.geometry?.type || "ukjent",
+    coordinateMethod: point.method,
     properties,
     latitude: point.latitude,
     longitude: point.longitude
@@ -170,7 +175,8 @@ function candidatePosts(lat, lon, rawPosts) {
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    });
+    })
+    .sort((a, b) => a.distanceFromStart - b.distanceFromStart || a.priority - b.priority);
   const preferred = sorted.filter((post) => post.collectionId !== "sikringssoner");
   return preferred.length ? preferred : sorted;
 }
@@ -251,6 +257,7 @@ export default function App() {
   const [gpsStatus, setGpsStatus] = useState(null);
   const [location, setLocation] = useState(null);
   const [posts, setPosts] = useState([]);
+  const [candidates, setCandidates] = useState([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [reports, setReports] = useState([]);
 
@@ -309,6 +316,7 @@ export default function App() {
     setLoading(true);
     setScreen("OGC_TEST");
     setPosts([]);
+    setCandidates([]);
     setReports([]);
     setStatus("Henter GPS og lager større OGC-bounds...");
     setApiStatus("Starter Riksantikvaren OGC GeoJSON-test.");
@@ -323,11 +331,12 @@ export default function App() {
       setApiStatus(`GPS ${round5(lat)}, ${round5(lon)}. Nøyaktighet: ${accuracy}. BBox: ${boundsText(bounds)}.`);
       const result = await scanOgcBounds(bounds, setStatus);
       setReports(result.reports);
-      const route = walkingRouteFrom(lat, lon, result.hits, ROUTE_COUNT);
       const useful = candidatePosts(lat, lon, result.hits);
+      setCandidates(useful.slice(0, DEBUG_COUNT));
+      const route = walkingRouteFrom(lat, lon, result.hits, ROUTE_COUNT);
       const collectionsWithHits = result.reports.filter((r) => r.raw > 0);
       const fallbackUsed = useful.length > 0 && useful.every((post) => post.collectionId === "sikringssoner");
-      setApiStatus(`OGC samlinger: ${result.reports.length}. Samlinger med treff: ${collectionsWithHits.length}. Rå treff: ${result.hits.length}. Innen 2 km: ${useful.length}. Rute: nærmeste neste post. ${fallbackUsed ? "Fallback: sikringssoner." : "Bruker lokaliteter/enkeltminner."}`);
+      setApiStatus(`OGC samlinger: ${result.reports.length}. Samlinger med treff: ${collectionsWithHits.length}. Rå treff: ${result.hits.length}. Innen 2 km: ${useful.length}. Viser ${Math.min(useful.length, DEBUG_COUNT)} kandidater. ${fallbackUsed ? "Fallback: sikringssoner." : "Bruker lokaliteter/enkeltminner."}`);
       if (route.length > 0) { startWithRoute(route); return; }
       setStatus("Ingen OGC-treff innen 2 km. Se rapport under.");
     } catch (error) {
@@ -337,7 +346,7 @@ export default function App() {
     } finally { setLoading(false); }
   }
 
-  function reset() { setScreen("MENU"); setLoading(false); setStatus("Klar."); setApiStatus(""); setPosts([]); setActiveIndex(0); setReports([]); }
+  function reset() { setScreen("MENU"); setLoading(false); setStatus("Klar."); setApiStatus(""); setPosts([]); setCandidates([]); setActiveIndex(0); setReports([]); }
 
   const foundCount = posts.filter((post) => post.found).length;
 
@@ -345,12 +354,12 @@ export default function App() {
     return (
       <View style={styles.menu}>
         <Text style={styles.title}>Riksantikvaren OGC-test</Text>
-        <Text style={styles.menuText}>Tester OGC API / GeoJSON. Lager opptil 4 poster innen 2 km og sorterer dem som en enkel gåtur.</Text>
+        <Text style={styles.menuText}>Tester OGC API / GeoJSON. Lager opptil 4 poster innen 2 km og viser kandidat-debug.</Text>
         {loading ? <ActivityIndicator size="large" color="#FFFFFF" /> : null}
         <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} />
         <TouchableOpacity style={styles.mainButton} onPress={startOgcTest} disabled={loading}>
           <Text style={styles.buttonTitle}>START 4-POSTERS RUTE</Text>
-          <Text style={styles.buttonText}>GPS → større bbox → nærmeste neste post</Text>
+          <Text style={styles.buttonText}>GPS → større bbox → kandidat-debug</Text>
         </TouchableOpacity>
       </View>
     );
@@ -374,11 +383,19 @@ export default function App() {
                 <Text style={styles.postName}>{activePost.name}</Text>
                 <Text style={styles.postMeta}>Avstand: {activeDistance === null ? "venter på GPS" : `${Math.round(activeDistance)} m`}</Text>
                 <Text style={styles.postMeta}>Retning: {activeBearing === null ? "venter på GPS" : directionText(activeBearing)}</Text>
+                <Text style={styles.postMeta}>Geometri: {activePost.geometryType} • {activePost.coordinateMethod}</Text>
+                <Text style={styles.postMeta}>Koordinat: {round5(activePost.latitude)}, {round5(activePost.longitude)}</Text>
                 <Text style={styles.postMeta}>GPS-nøyaktighet: {location?.coords?.accuracy !== undefined ? `${Math.round(location.coords.accuracy)} m` : "ukjent"}</Text>
               </View>
             ) : null}
+            <CandidateDebug candidates={candidates} />
           </>
-        ) : <CollectionReport reports={reports} />}
+        ) : (
+          <>
+            <CandidateDebug candidates={candidates} />
+            <CollectionReport reports={reports} />
+          </>
+        )}
       </View>
       <TouchableOpacity style={styles.backButton} onPress={reset}><Text style={styles.backText}>Tilbake</Text></TouchableOpacity>
     </ScrollView>
@@ -397,6 +414,23 @@ function GpsStatusBox({ gpsStatus, onRefresh, onSettings, compact }) {
         <TouchableOpacity style={styles.smallButton} onPress={onRefresh}><Text style={styles.smallButtonText}>Sjekk GPS-status</Text></TouchableOpacity>
         <TouchableOpacity style={styles.smallButton} onPress={onSettings}><Text style={styles.smallButtonText}>Åpne innstillinger</Text></TouchableOpacity>
       </View>
+    </View>
+  );
+}
+
+function CandidateDebug({ candidates }) {
+  if (!candidates.length) return null;
+  return (
+    <View style={styles.layerBox}>
+      <Text style={styles.layerTitle}>Kandidat-debug</Text>
+      {candidates.map((candidate, index) => (
+        <View key={`${candidate.id}-${index}`} style={styles.debugRow}>
+          <Text style={styles.layerText}>{index + 1}. {candidate.name}</Text>
+          <Text style={styles.layerSub}>{candidate.collectionLabel} • {Math.round(candidate.distanceFromStart)} m</Text>
+          <Text style={styles.layerSub}>Geometri: {candidate.geometryType} • {candidate.coordinateMethod}</Text>
+          <Text style={styles.layerSub}>Koordinat: {round5(candidate.latitude)}, {round5(candidate.longitude)}</Text>
+        </View>
+      ))}
     </View>
   );
 }
@@ -442,6 +476,7 @@ const styles = StyleSheet.create({
   layerBox: { width: "100%", marginTop: 18 },
   layerTitle: { color: "#F59E0B", fontSize: 17, fontWeight: "900", textAlign: "center", marginBottom: 10 },
   layerRow: { width: "100%", backgroundColor: "#111827", borderRadius: 12, padding: 12, marginTop: 8, borderWidth: 1, borderColor: "#334155" },
+  debugRow: { width: "100%", backgroundColor: "#0F172A", borderRadius: 12, padding: 12, marginTop: 8, borderWidth: 1, borderColor: "#475569" },
   layerHit: { borderColor: "#22C55E", backgroundColor: "rgba(34,197,94,0.12)" },
   layerText: { color: "#E2E8F0", fontSize: 14, fontWeight: "800" },
   layerSub: { color: "#94A3B8", fontSize: 13, marginTop: 3 },
