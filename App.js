@@ -1,496 +1,520 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  Linking,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import * as Location from "expo-location";
 
-const OGC_BASE = "https://api.ra.no/LokaliteterEnkeltminnerOgSikringssoner";
-const OGC_COLLECTIONS = [
-  { id: "lokaliteter", label: "Lokaliteter", priority: 1 },
-  { id: "enkeltminner", label: "Enkeltminner", priority: 2 },
-  { id: "sikringssoner", label: "Sikringssoner", priority: 9 }
-];
-const BOUNDS_DELTA = 0.018;
-const FOUND_RADIUS = 40;
-const ROUTE_RADIUS = 2000;
-const ROUTE_COUNT = 4;
-const DEBUG_COUNT = 12;
+/**
+ * MANUELL TEST-RUTE
+ *
+ * Viktig personvern:
+ * - Dette er dummy-/offentlige testkoordinater, ikke private punkter.
+ * - Ikke legg inn hjemmekoordinater eller hjemmenære GPS-punkter i repo.
+ * - Bytt disse lokalt med egne poster når du tester fysisk.
+ * - Hold faktiske poster unna privat bolig, hytte, arbeidssted eller andre sensitive mønstre.
+ */
+const TEST_ROUTE = {
+  id: "manual-test-route-001",
+  name: "Manuell Rebus-test",
+  posts: [
+    {
+      id: "post-1",
+      title: "Post 1",
+      latitude: 59.9109,
+      longitude: 10.7532,
+      radius: 50,
+      hint: "Gå til første testpunkt.",
+      question: "Hva ser du ved første post?",
+      answer: "placeholder",
+    },
+    {
+      id: "post-2",
+      title: "Post 2",
+      latitude: 59.9075,
+      longitude: 10.7532,
+      radius: 45,
+      hint: "Fortsett til neste punkt.",
+      question: "Hva er kjennetegnet ved dette stedet?",
+      answer: "placeholder",
+    },
+    {
+      id: "post-3",
+      title: "Post 3",
+      latitude: 59.908,
+      longitude: 10.756,
+      radius: 40,
+      hint: "Du nærmer deg tredje punkt.",
+      question: "Hvilket bygg eller landemerke er nærmest?",
+      answer: "placeholder",
+    },
+    {
+      id: "post-4",
+      title: "Post 4",
+      latitude: 59.9069,
+      longitude: 10.7364,
+      radius: 50,
+      hint: "Siste post i ruten.",
+      question: "Hva er sluttordet for ruten?",
+      answer: "placeholder",
+    },
+  ],
+};
 
-const toRad = (v) => (v * Math.PI) / 180;
-const toDeg = (v) => (v * 180) / Math.PI;
-const round5 = (v) => Number(v).toFixed(5);
+const toRad = (value) => (value * Math.PI) / 180;
 
 function distanceM(aLat, aLon, bLat, bLon) {
   const dLat = toRad(bLat - aLat);
   const dLon = toRad(bLon - aLon);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
+  const lat1 = toRad(aLat);
+  const lat2 = toRad(bLat);
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+
   return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function bearing(aLat, aLon, bLat, bLon) {
-  const dLon = toRad(bLon - aLon);
-  const y = Math.sin(dLon) * Math.cos(toRad(bLat));
-  const x = Math.cos(toRad(aLat)) * Math.sin(toRad(bLat)) - Math.sin(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.cos(dLon);
-  return (toDeg(Math.atan2(y, x)) + 360) % 360;
-}
-
-function directionText(value) {
-  const labels = ["Nord", "Nordøst", "Øst", "Sørøst", "Sør", "Sørvest", "Vest", "Nordvest"];
-  return labels[Math.round(value / 45) % labels.length];
-}
-
-function qs(params) {
-  return params.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
-}
-
-function makeBounds(lat, lon, delta = BOUNDS_DELTA) {
-  return { west: lon - delta, south: lat - delta, east: lon + delta, north: lat + delta };
-}
-
-function boundsToBbox(bounds) {
-  return `${bounds.west},${bounds.south},${bounds.east},${bounds.north}`;
-}
-
-function boundsText(bounds) {
-  return `V ${round5(bounds.west)}, S ${round5(bounds.south)}, Ø ${round5(bounds.east)}, N ${round5(bounds.north)}`;
-}
-
-async function json(url) {
-  const response = await fetch(url);
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${response.status}: ${text.slice(0, 140)}`);
-  return JSON.parse(text);
-}
-
-function first(obj, keys) {
-  for (const key of keys) {
-    const value = obj?.[key];
-    if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
-  }
-  return null;
-}
-
-function collectCoordinates(geometry) {
-  const out = [];
-  function walk(value) {
-    if (!Array.isArray(value)) return;
-    if (typeof value[0] === "number" && typeof value[1] === "number") {
-      const lon = Number(value[0]);
-      const lat = Number(value[1]);
-      if (Number.isFinite(lat) && Number.isFinite(lon)) out.push({ latitude: lat, longitude: lon });
-      return;
-    }
-    value.forEach(walk);
-  }
-  walk(geometry?.coordinates);
-  return out;
-}
-
-function averagePoint(points) {
-  if (!points.length) return null;
-  const sum = points.reduce((acc, p) => ({ latitude: acc.latitude + p.latitude, longitude: acc.longitude + p.longitude }), { latitude: 0, longitude: 0 });
-  return { latitude: sum.latitude / points.length, longitude: sum.longitude / points.length };
-}
-
-function nearestGeometryPoint(points, refLat, refLon) {
-  if (!points.length) return null;
-  let best = points[0];
-  let bestDistance = distanceM(refLat, refLon, best.latitude, best.longitude);
-  for (const point of points.slice(1)) {
-    const d = distanceM(refLat, refLon, point.latitude, point.longitude);
-    if (d < bestDistance) {
-      best = point;
-      bestDistance = d;
-    }
-  }
-  return best;
-}
-
-function featurePointInfo(feature) {
-  const geometry = feature?.geometry;
-  if (!geometry) return null;
-  const points = collectCoordinates(geometry);
-  if (!points.length) return null;
-  if (geometry.type === "Point") return { ...points[0], method: "punkt", geometryPoints: points };
-  const center = averagePoint(points);
-  if (!center) return null;
-  return { ...center, method: "beregnet midtpunkt", geometryPoints: points };
-}
-
-function featureName(properties, fallback) {
-  return first(properties, [
-    "navn", "lokalitetsnavn", "enkeltminneart", "art", "kategori", "vernetype",
-    "NAVN", "LOKALITETSNAVN", "ENKELTMINNEART", "ART", "KATEGORI", "VERNETYPE"
-  ]) || fallback;
-}
-
-function normalizeFeature(collection, feature, index) {
-  const point = featurePointInfo(feature);
-  if (!point || !Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)) return null;
-  const properties = feature.properties || {};
-  return {
-    id: `${collection.id}-${feature.id || properties.id || properties.OBJECTID || index}`,
-    collectionId: collection.id,
-    collectionLabel: collection.label,
-    priority: collection.priority,
-    source: "Riksantikvaren OGC",
-    name: featureName(properties, `${collection.label} ${index + 1}`),
-    geometryType: feature.geometry?.type || "ukjent",
-    coordinateMethod: point.method,
-    geometryPoints: point.geometryPoints || [],
-    properties,
-    latitude: point.latitude,
-    longitude: point.longitude
-  };
-}
-
-async function fetchOgcCollection(collection, bounds, limit = 100) {
-  const url = `${OGC_BASE}/collections/${collection.id}/items?${qs([
-    ["f", "json"],
-    ["bbox", boundsToBbox(bounds)],
-    ["limit", limit]
-  ])}`;
-  const data = await json(url);
-  const features = Array.isArray(data?.features) ? data.features : [];
-  return features.map((feature, index) => normalizeFeature(collection, feature, index)).filter(Boolean);
-}
-
-async function scanOgcBounds(bounds, onProgress) {
-  const results = [];
-  const reports = [];
-  for (const collection of OGC_COLLECTIONS) {
-    try {
-      const hits = await fetchOgcCollection(collection, bounds, 100);
-      results.push(...hits);
-      reports.push({ id: collection.id, name: collection.label, raw: hits.length, error: null });
-      onProgress?.(`${collection.label}: ${hits.length} treff`);
-    } catch (error) {
-      reports.push({ id: collection.id, name: collection.label, raw: 0, error: error?.message || String(error) });
-      onProgress?.(`${collection.label}: feil`);
-    }
-  }
-  return { hits: results, reports };
-}
-
-function candidatePosts(lat, lon, rawPosts) {
-  const seen = new Set();
-  const sorted = rawPosts
-    .map((post) => {
-      const nearest = post.geometryType === "Point" ? null : nearestGeometryPoint(post.geometryPoints || [], lat, lon);
-      const adjusted = nearest ? { ...post, latitude: nearest.latitude, longitude: nearest.longitude, coordinateMethod: "nærmeste geometripunkt" } : post;
-      return { ...adjusted, distanceFromStart: distanceM(lat, lon, adjusted.latitude, adjusted.longitude) };
-    })
-    .filter((post) => Number.isFinite(post.distanceFromStart))
-    .filter((post) => post.distanceFromStart <= ROUTE_RADIUS)
-    .filter((post) => {
-      const key = `${post.collectionId}:${String(post.name).toLowerCase()}:${post.latitude.toFixed(5)}:${post.longitude.toFixed(5)}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort((a, b) => a.distanceFromStart - b.distanceFromStart || a.priority - b.priority);
-  const preferred = sorted.filter((post) => post.collectionId !== "sikringssoner");
-  return preferred.length ? preferred : sorted;
-}
-
-function walkingRouteFrom(lat, lon, rawPosts, count) {
-  const remaining = candidatePosts(lat, lon, rawPosts);
-  const route = [];
-  let current = { latitude: lat, longitude: lon };
-
-  while (remaining.length > 0 && route.length < count) {
-    remaining.sort((a, b) => {
-      const ad = distanceM(current.latitude, current.longitude, a.latitude, a.longitude);
-      const bd = distanceM(current.latitude, current.longitude, b.latitude, b.longitude);
-      return ad - bd || a.priority - b.priority || a.distanceFromStart - b.distanceFromStart;
-    });
-    const next = remaining.shift();
-    route.push(next);
-    current = { latitude: next.latitude, longitude: next.longitude };
+function formatMeters(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "ukjent";
   }
 
-  return route.map((post, index) => ({ ...post, number: index + 1, found: false }));
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(2)} km`;
+  }
+
+  return `${Math.round(value)} m`;
 }
 
 async function readGpsStatus() {
   const servicesEnabled = await Location.hasServicesEnabledAsync();
   const permission = await Location.getForegroundPermissionsAsync();
-  return { servicesEnabled, status: permission.status, granted: permission.granted, canAskAgain: permission.canAskAgain, expires: String(permission.expires) };
+
+  return {
+    servicesEnabled,
+    status: permission.status,
+    granted: permission.granted,
+    canAskAgain: permission.canAskAgain,
+    expires: String(permission.expires),
+  };
 }
 
 async function ensureGpsPermission(setGpsStatus) {
   let status = await readGpsStatus();
   setGpsStatus?.(status);
+
   if (!status.servicesEnabled) {
     Alert.alert("GPS er av", "Slå på posisjonstjenester på telefonen først.");
     return false;
   }
+
   if (status.status !== "granted") {
     const requested = await Location.requestForegroundPermissionsAsync();
-    status = { servicesEnabled: await Location.hasServicesEnabledAsync(), status: requested.status, granted: requested.granted, canAskAgain: requested.canAskAgain, expires: String(requested.expires) };
+
+    status = {
+      servicesEnabled: await Location.hasServicesEnabledAsync(),
+      status: requested.status,
+      granted: requested.granted,
+      canAskAgain: requested.canAskAgain,
+      expires: String(requested.expires),
+    };
+
     setGpsStatus?.(status);
   }
-  if (status.status === "granted") return true;
-  const message = status.canAskAgain === false ? "Telefonen sier at appen ikke kan spørre på nytt. Åpne innstillinger og gi posisjon til GPS og Gyro Test." : "Testen må ha GPS-tilgang.";
+
+  if (status.status === "granted") {
+    return true;
+  }
+
+  const message =
+    status.canAskAgain === false
+      ? "Telefonen sier at appen ikke kan spørre på nytt. Åpne innstillinger og gi posisjonstilgang."
+      : "Testen må ha GPS-tilgang.";
+
   Alert.alert("GPS ikke godkjent", message);
   return false;
 }
 
-async function getGpsFix(setGpsStatus) {
-  const allowed = await ensureGpsPermission(setGpsStatus);
-  if (!allowed) return null;
-  return await new Promise((resolve) => {
-    let settled = false;
-    let sub = null;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      if (sub) sub.remove();
-      resolve(value);
-    };
-    const timeout = setTimeout(() => finish(null), 12000);
-    Location.watchPositionAsync({ accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 0 }, (next) => {
-      clearTimeout(timeout);
-      finish(next);
-    }).then((subscription) => { sub = subscription; }).catch((error) => {
-      clearTimeout(timeout);
-      console.log("GPS first fix feilet:", error?.message || error);
-      Alert.alert("GPS feilet", "Telefonen nekter fortsatt GPS. Trykk Sjekk GPS-status og se hva status viser.");
-      finish(null);
-    });
-  });
-}
-
 export default function App() {
-  const [screen, setScreen] = useState("MENU");
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("Klar.");
-  const [apiStatus, setApiStatus] = useState("");
   const [gpsStatus, setGpsStatus] = useState(null);
   const [location, setLocation] = useState(null);
-  const [posts, setPosts] = useState([]);
-  const [candidates, setCandidates] = useState([]);
+  const [status, setStatus] = useState("Starter GPS...");
   const [activeIndex, setActiveIndex] = useState(0);
-  const [reports, setReports] = useState([]);
+  const [openedPostIds, setOpenedPostIds] = useState([]);
 
-  useEffect(() => { readGpsStatus().then(setGpsStatus).catch(() => {}); }, []);
+  const activePost = TEST_ROUTE.posts[activeIndex] || null;
+  const routeCompleted = activeIndex >= TEST_ROUTE.posts.length;
 
   useEffect(() => {
-    if (screen !== "REBUS") return undefined;
+    readGpsStatus().then(setGpsStatus).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     let gpsSub;
     let mounted = true;
+
     async function watch() {
       try {
         const allowed = await ensureGpsPermission(setGpsStatus);
-        if (!allowed || !mounted) return;
-        gpsSub = await Location.watchPositionAsync({ accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 }, (next) => mounted && setLocation(next));
+
+        if (!allowed || !mounted) {
+          setStatus("GPS ikke klar.");
+          return;
+        }
+
+        setStatus("GPS aktiv.");
+
+        const firstFix = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.High,
+        });
+
+        if (mounted) {
+          setLocation(firstFix);
+        }
+
+        gpsSub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.High,
+            timeInterval: 1000,
+            distanceInterval: 1,
+          },
+          (next) => {
+            if (mounted) {
+              setLocation(next);
+            }
+          }
+        );
       } catch (error) {
         console.log("GPS-sporing feilet:", error?.message || error);
-        if (mounted) setStatus("GPS-sporing feilet. Sjekk GPS-status.");
+        if (mounted) {
+          setStatus("GPS-sporing feilet. Sjekk GPS-status.");
+        }
       }
     }
-    watch();
-    return () => { mounted = false; if (gpsSub) gpsSub.remove(); };
-  }, [screen]);
 
-  const activePost = posts[activeIndex] || null;
-  const activeDistance = useMemo(() => !location || !activePost ? null : distanceM(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude), [location, activePost]);
-  const activeBearing = useMemo(() => !location || !activePost ? null : bearing(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude), [location, activePost]);
+    watch();
+
+    return () => {
+      mounted = false;
+      if (gpsSub) gpsSub.remove();
+    };
+  }, []);
+
+  const activeDistance = useMemo(() => {
+    if (!location || !activePost) return null;
+
+    return distanceM(
+      location.coords.latitude,
+      location.coords.longitude,
+      activePost.latitude,
+      activePost.longitude
+    );
+  }, [location, activePost]);
+
+  const activePostIsOpen = !!activePost && openedPostIds.includes(activePost.id);
+  const withinRadius =
+    !!activePost &&
+    activeDistance !== null &&
+    Number.isFinite(activeDistance) &&
+    activeDistance <= activePost.radius;
 
   useEffect(() => {
-    if (screen !== "REBUS" || !location || !activePost || activePost.found) return;
-    const d = distanceM(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude);
-    if (d <= FOUND_RADIUS) {
-      const updated = posts.map((post, index) => index === activeIndex ? { ...post, found: true } : post);
-      setPosts(updated);
-      const nextIndex = updated.findIndex((post) => !post.found);
-      if (nextIndex === -1) setStatus("Post funnet. Alle postene er funnet.");
-      else { setActiveIndex(nextIndex); setStatus(`Post ${activePost.number} funnet. Gå til post ${updated[nextIndex].number}: ${updated[nextIndex].name}`); }
-      return;
-    }
-    setStatus(`Gå mot ${directionText(bearing(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude))}. Avstand: ${Math.round(d)} meter.`);
-  }, [location, screen, activeIndex, activePost, posts]);
+    if (!activePost || !withinRadius || activePostIsOpen) return;
 
-  async function refreshGps() {
-    try { setGpsStatus(await readGpsStatus()); } catch (error) { setStatus(`Klarte ikke lese GPS-status: ${error?.message || error}`); }
+    setOpenedPostIds((currentIds) => {
+      if (currentIds.includes(activePost.id)) return currentIds;
+      return [...currentIds, activePost.id];
+    });
+  }, [activePost, withinRadius, activePostIsOpen]);
+
+  function nextPost() {
+    if (!activePostIsOpen) return;
+    setActiveIndex((current) => current + 1);
   }
 
-  function openSettings() { Linking.openSettings().catch(() => Alert.alert("Innstillinger", "Klarte ikke åpne app-innstillinger.")); }
-
-  function startWithRoute(route) {
-    setPosts(route);
-    setActiveIndex(0);
-    setScreen("REBUS");
-    setStatus(route.length === 1 ? `1-post test klar. Gå til: ${route[0].name}` : `Rute klar. Gå til post 1: ${route[0].name}`);
+  function openSettings() {
+    Linking.openSettings().catch(() => {});
   }
 
-  async function startOgcTest() {
-    setLoading(true);
-    setScreen("OGC_TEST");
-    setPosts([]);
-    setCandidates([]);
-    setReports([]);
-    setStatus("Henter GPS og lager større OGC-bounds...");
-    setApiStatus("Starter Riksantikvaren OGC GeoJSON-test.");
-    try {
-      const current = await getGpsFix(setGpsStatus);
-      if (!current) { setStatus("Ingen GPS-fix. Trykk Sjekk GPS-status og kontroller tillatelsen."); return; }
-      setLocation(current);
-      const lat = current.coords.latitude;
-      const lon = current.coords.longitude;
-      const bounds = makeBounds(lat, lon);
-      const accuracy = current.coords.accuracy ? `${Math.round(current.coords.accuracy)} m` : "ukjent";
-      setApiStatus(`GPS ${round5(lat)}, ${round5(lon)}. Nøyaktighet: ${accuracy}. BBox: ${boundsText(bounds)}.`);
-      const result = await scanOgcBounds(bounds, setStatus);
-      setReports(result.reports);
-      const useful = candidatePosts(lat, lon, result.hits);
-      setCandidates(useful.slice(0, DEBUG_COUNT));
-      const route = walkingRouteFrom(lat, lon, result.hits, ROUTE_COUNT);
-      const collectionsWithHits = result.reports.filter((r) => r.raw > 0);
-      const fallbackUsed = useful.length > 0 && useful.every((post) => post.collectionId === "sikringssoner");
-      setApiStatus(`OGC samlinger: ${result.reports.length}. Samlinger med treff: ${collectionsWithHits.length}. Rå treff: ${result.hits.length}. Innen 2 km: ${useful.length}. Viser ${Math.min(useful.length, DEBUG_COUNT)} kandidater. ${fallbackUsed ? "Fallback: sikringssoner." : "Bruker lokaliteter/enkeltminner."}`);
-      if (route.length > 0) { startWithRoute(route); return; }
-      setStatus("Ingen OGC-treff innen 2 km. Se rapport under.");
-    } catch (error) {
-      console.log("OGC-test feilet:", error?.message || error);
-      setStatus(`OGC-test feilet: ${error?.message || error}`);
-      Alert.alert("OGC-test feilet", "Se statusfeltet for detaljer.");
-    } finally { setLoading(false); }
-  }
+  const gpsAccuracy = location?.coords?.accuracy;
+  const routeStatus = routeCompleted
+    ? "Ruten er fullført"
+    : activePostIsOpen
+      ? "post åpnet"
+      : "gå nærmere";
 
-  function reset() { setScreen("MENU"); setLoading(false); setStatus("Klar."); setApiStatus(""); setPosts([]); setCandidates([]); setActiveIndex(0); setReports([]); }
-
-  const foundCount = posts.filter((post) => post.found).length;
-
-  if (screen === "MENU") {
+  if (!location && gpsStatus?.status !== "denied") {
     return (
-      <View style={styles.menu}>
-        <Text style={styles.title}>Riksantikvaren OGC-test</Text>
-        <Text style={styles.menuText}>Tester OGC API / GeoJSON. Polygoner bruker nå nærmeste geometripunkt mot GPS.</Text>
-        {loading ? <ActivityIndicator size="large" color="#FFFFFF" /> : null}
-        <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} />
-        <TouchableOpacity style={styles.mainButton} onPress={startOgcTest} disabled={loading}>
-          <Text style={styles.buttonTitle}>START 4-POSTERS RUTE</Text>
-          <Text style={styles.buttonText}>GPS → bbox → nærmeste geometripunkt</Text>
-        </TouchableOpacity>
-      </View>
+      <SafeAreaView style={styles.container}>
+        <View style={styles.centered}>
+          <ActivityIndicator />
+          <Text style={styles.loadingText}>{status}</Text>
+          <Text style={styles.mutedText}>Venter på første GPS-posisjon.</Text>
+        </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.game}>
-      <Text style={styles.title}>{screen === "REBUS" ? "Rebus GPS-test" : "OGC GeoJSON-test"}</Text>
-      <Text style={styles.kicker}>Riksantikvaren OGC API</Text>
-      <View style={styles.card}>
-        {loading ? <ActivityIndicator size="large" color="#F59E0B" /> : null}
-        <Text style={styles.status}>{status}</Text>
-        <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} compact />
-        <Text style={styles.meta}>{apiStatus}</Text>
-        {screen === "REBUS" ? (
-          <>
-            <Text style={styles.meta}>Poster funnet: {foundCount} / {posts.length}</Text>
-            {activePost && !activePost.found ? (
-              <View style={styles.postCard}>
-                <Text style={styles.source}>{activePost.source} • {activePost.collectionLabel}</Text>
-                <Text style={styles.postName}>{activePost.name}</Text>
-                <Text style={styles.postMeta}>Avstand: {activeDistance === null ? "venter på GPS" : `${Math.round(activeDistance)} m`}</Text>
-                <Text style={styles.postMeta}>Retning: {activeBearing === null ? "venter på GPS" : directionText(activeBearing)}</Text>
-                <Text style={styles.postMeta}>Geometri: {activePost.geometryType} • {activePost.coordinateMethod}</Text>
-                <Text style={styles.postMeta}>Koordinat: {round5(activePost.latitude)}, {round5(activePost.longitude)}</Text>
-                <Text style={styles.postMeta}>GPS-nøyaktighet: {location?.coords?.accuracy !== undefined ? `${Math.round(location.coords.accuracy)} m` : "ukjent"}</Text>
-              </View>
-            ) : null}
-            <CandidateDebug candidates={candidates} />
-          </>
+    <SafeAreaView style={styles.container}>
+      <ScrollView contentContainerStyle={styles.content}>
+        <Text style={styles.kicker}>Rebus GPS-test</Text>
+        <Text style={styles.title}>{TEST_ROUTE.name}</Text>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Status</Text>
+          <Text style={styles.statusText}>{routeStatus}</Text>
+          <Text style={styles.bodyText}>{status}</Text>
+        </View>
+
+        {gpsStatus?.status === "denied" ? (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>GPS-tilgang mangler</Text>
+            <Text style={styles.bodyText}>
+              Appen trenger posisjonstilgang for å teste Rebus-flyten.
+            </Text>
+            <TouchableOpacity style={styles.secondaryButton} onPress={openSettings} activeOpacity={0.8}>
+              <Text style={styles.secondaryButtonText}>Åpne innstillinger</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {routeCompleted ? (
+          <View style={styles.card}>
+            <Text style={styles.completedTitle}>Ruten er fullført</Text>
+            <Text style={styles.bodyText}>Alle poster i test-ruten er åpnet.</Text>
+          </View>
         ) : (
           <>
-            <CandidateDebug candidates={candidates} />
-            <CollectionReport reports={reports} />
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Aktiv post</Text>
+              <Text style={styles.postTitle}>
+                {activeIndex + 1}. {activePost.title}
+              </Text>
+
+              <View style={styles.row}>
+                <Text style={styles.label}>Avstand</Text>
+                <Text style={styles.value}>{formatMeters(activeDistance)}</Text>
+              </View>
+
+              <View style={styles.row}>
+                <Text style={styles.label}>Radius</Text>
+                <Text style={styles.value}>{activePost.radius} m</Text>
+              </View>
+
+              <View style={styles.row}>
+                <Text style={styles.label}>GPS-nøyaktighet</Text>
+                <Text style={styles.value}>{formatMeters(gpsAccuracy)}</Text>
+              </View>
+            </View>
+
+            {activePostIsOpen ? (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Post åpnet</Text>
+
+                <Text style={styles.sectionLabel}>Hint</Text>
+                <Text style={styles.bodyText}>{activePost.hint}</Text>
+
+                <Text style={styles.sectionLabel}>Oppgave</Text>
+                <Text style={styles.bodyText}>{activePost.question}</Text>
+
+                <TouchableOpacity style={styles.button} onPress={nextPost} activeOpacity={0.8}>
+                  <Text style={styles.buttonText}>Neste post</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Gå nærmere</Text>
+                <Text style={styles.bodyText}>
+                  Posten åpnes automatisk når GPS-posisjonen er innenfor radius.
+                </Text>
+              </View>
+            )}
           </>
         )}
-      </View>
-      <TouchableOpacity style={styles.backButton} onPress={reset}><Text style={styles.backText}>Tilbake</Text></TouchableOpacity>
-    </ScrollView>
-  );
-}
 
-function GpsStatusBox({ gpsStatus, onRefresh, onSettings, compact }) {
-  return (
-    <View style={styles.gpsBox}>
-      <Text style={styles.gpsTitle}>GPS-status</Text>
-      <Text style={styles.gpsText}>Stedstjenester: {gpsStatus ? String(gpsStatus.servicesEnabled) : "ukjent"}</Text>
-      <Text style={styles.gpsText}>Permission: {gpsStatus?.status || "ukjent"}</Text>
-      <Text style={styles.gpsText}>Granted: {gpsStatus ? String(gpsStatus.granted) : "ukjent"}</Text>
-      {!compact ? <Text style={styles.gpsText}>Can ask again: {gpsStatus ? String(gpsStatus.canAskAgain) : "ukjent"}</Text> : null}
-      <View style={styles.gpsButtons}>
-        <TouchableOpacity style={styles.smallButton} onPress={onRefresh}><Text style={styles.smallButtonText}>Sjekk GPS-status</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.smallButton} onPress={onSettings}><Text style={styles.smallButtonText}>Åpne innstillinger</Text></TouchableOpacity>
-      </View>
-    </View>
-  );
-}
-
-function CandidateDebug({ candidates }) {
-  if (!candidates.length) return null;
-  return (
-    <View style={styles.layerBox}>
-      <Text style={styles.layerTitle}>Kandidat-debug</Text>
-      {candidates.map((candidate, index) => (
-        <View key={`${candidate.id}-${index}`} style={styles.debugRow}>
-          <Text style={styles.layerText}>{index + 1}. {candidate.name}</Text>
-          <Text style={styles.layerSub}>{candidate.collectionLabel} • {Math.round(candidate.distanceFromStart)} m</Text>
-          <Text style={styles.layerSub}>Geometri: {candidate.geometryType} • {candidate.coordinateMethod}</Text>
-          <Text style={styles.layerSub}>Koordinat: {round5(candidate.latitude)}, {round5(candidate.longitude)}</Text>
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Fremdrift</Text>
+          <Text style={styles.bodyText}>
+            {openedPostIds.length} av {TEST_ROUTE.posts.length} poster åpnet
+          </Text>
         </View>
-      ))}
-    </View>
-  );
-}
 
-function CollectionReport({ reports }) {
-  if (!reports.length) return null;
-  return (
-    <View style={styles.layerBox}>
-      <Text style={styles.layerTitle}>Samlinger</Text>
-      {reports.map((r) => (
-        <View key={r.id} style={[styles.layerRow, r.raw > 0 && styles.layerHit]}>
-          <Text style={styles.layerText}>{r.name}</Text>
-          <Text style={styles.layerSub}>Treff: {r.raw}</Text>
-          {r.error ? <Text style={styles.layerError}>{String(r.error).slice(0, 110)}</Text> : null}
+        <View style={styles.debugCard}>
+          <Text style={styles.debugTitle}>GPS-status</Text>
+          <Text style={styles.debugText}>Tjenester: {String(gpsStatus?.servicesEnabled ?? "ukjent")}</Text>
+          <Text style={styles.debugText}>Tillatelse: {gpsStatus?.status ?? "ukjent"}</Text>
+          <Text style={styles.debugText}>Kan spørre igjen: {String(gpsStatus?.canAskAgain ?? "ukjent")}</Text>
         </View>
-      ))}
-    </View>
+
+        {location ? (
+          <View style={styles.debugCard}>
+            <Text style={styles.debugTitle}>Lokal GPS-debug</Text>
+            <Text style={styles.debugText}>Lat: {location.coords.latitude}</Text>
+            <Text style={styles.debugText}>Lon: {location.coords.longitude}</Text>
+            <Text style={styles.debugText}>Accuracy: {formatMeters(location.coords.accuracy)}</Text>
+          </View>
+        ) : null}
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  menu: { flex: 1, backgroundColor: "#0F172A", justifyContent: "center", alignItems: "center", padding: 24 },
-  game: { flexGrow: 1, backgroundColor: "#1E3A8A", padding: 20, justifyContent: "center", alignItems: "center" },
-  title: { color: "#FFFFFF", fontSize: 30, fontWeight: "900", textAlign: "center", marginBottom: 8 },
-  kicker: { color: "#F59E0B", fontSize: 13, fontWeight: "900", letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 16 },
-  menuText: { color: "#94A3B8", fontSize: 16, lineHeight: 23, textAlign: "center", marginBottom: 18 },
-  mainButton: { width: "100%", backgroundColor: "#3B82F6", borderRadius: 18, padding: 24, alignItems: "center", marginTop: 18 },
-  buttonTitle: { color: "#FFFFFF", fontSize: 20, fontWeight: "900", textAlign: "center" },
-  buttonText: { color: "rgba(255,255,255,0.82)", marginTop: 6, textAlign: "center" },
-  card: { width: "100%", backgroundColor: "#1E293B", borderRadius: 20, padding: 20, alignItems: "center", borderWidth: 1, borderColor: "rgba(148, 163, 184, 0.14)" },
-  status: { color: "#E2E8F0", fontSize: 20, fontWeight: "800", lineHeight: 28, textAlign: "center", marginTop: 8, marginBottom: 10 },
-  meta: { color: "#94A3B8", fontSize: 14, marginTop: 8, textAlign: "center" },
-  gpsBox: { width: "100%", backgroundColor: "#111827", borderRadius: 16, padding: 14, marginTop: 10, borderWidth: 1, borderColor: "#334155" },
-  gpsTitle: { color: "#F59E0B", fontSize: 15, fontWeight: "900", marginBottom: 6, textAlign: "center" },
-  gpsText: { color: "#E2E8F0", fontSize: 13, lineHeight: 19, textAlign: "center" },
-  gpsButtons: { flexDirection: "row", gap: 8, marginTop: 10 },
-  smallButton: { flex: 1, minHeight: 42, backgroundColor: "#334155", borderRadius: 12, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
-  smallButtonText: { color: "#E2E8F0", fontSize: 12, fontWeight: "900", textAlign: "center" },
-  postCard: { width: "100%", backgroundColor: "#F8FAFC", borderColor: "#E2E8F0", borderWidth: 1, borderRadius: 16, padding: 16, marginTop: 18 },
-  source: { color: "#2563EB", fontSize: 13, fontWeight: "900", textTransform: "uppercase", marginBottom: 5 },
-  postName: { color: "#0F172A", fontSize: 19, lineHeight: 25, fontWeight: "900", marginBottom: 10 },
-  postMeta: { color: "#334155", fontSize: 15, lineHeight: 22, fontWeight: "600" },
-  layerBox: { width: "100%", marginTop: 18 },
-  layerTitle: { color: "#F59E0B", fontSize: 17, fontWeight: "900", textAlign: "center", marginBottom: 10 },
-  layerRow: { width: "100%", backgroundColor: "#111827", borderRadius: 12, padding: 12, marginTop: 8, borderWidth: 1, borderColor: "#334155" },
-  debugRow: { width: "100%", backgroundColor: "#0F172A", borderRadius: 12, padding: 12, marginTop: 8, borderWidth: 1, borderColor: "#475569" },
-  layerHit: { borderColor: "#22C55E", backgroundColor: "rgba(34,197,94,0.12)" },
-  layerText: { color: "#E2E8F0", fontSize: 14, fontWeight: "800" },
-  layerSub: { color: "#94A3B8", fontSize: 13, marginTop: 3 },
-  layerError: { color: "#FCA5A5", fontSize: 12, marginTop: 3 },
-  backButton: { marginTop: 40, borderBottomColor: "#CBD5E1", borderBottomWidth: 1, paddingBottom: 5 },
-  backText: { color: "#CBD5E1", fontSize: 16, fontWeight: "700" }
+  container: {
+    flex: 1,
+    backgroundColor: "#101114",
+  },
+  content: {
+    padding: 20,
+    gap: 14,
+  },
+  centered: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    backgroundColor: "#101114",
+  },
+  loadingText: {
+    marginTop: 12,
+    color: "#f2f2f2",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  mutedText: {
+    marginTop: 8,
+    color: "#9ca3af",
+    fontSize: 14,
+    textAlign: "center",
+  },
+  kicker: {
+    color: "#9ca3af",
+    fontSize: 14,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  title: {
+    color: "#ffffff",
+    fontSize: 28,
+    fontWeight: "800",
+    marginBottom: 4,
+  },
+  card: {
+    backgroundColor: "#1c1f26",
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "#2d3340",
+  },
+  debugCard: {
+    backgroundColor: "#15171c",
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "#2d3340",
+  },
+  cardTitle: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 10,
+  },
+  completedTitle: {
+    color: "#ffffff",
+    fontSize: 22,
+    fontWeight: "800",
+    marginBottom: 8,
+  },
+  postTitle: {
+    color: "#ffffff",
+    fontSize: 22,
+    fontWeight: "800",
+    marginBottom: 16,
+  },
+  statusText: {
+    color: "#ffffff",
+    fontSize: 24,
+    fontWeight: "800",
+    marginBottom: 8,
+  },
+  bodyText: {
+    color: "#d1d5db",
+    fontSize: 16,
+    lineHeight: 23,
+  },
+  sectionLabel: {
+    color: "#9ca3af",
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 12,
+    marginBottom: 4,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
+  row: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 12,
+    paddingVertical: 6,
+  },
+  label: {
+    color: "#9ca3af",
+    fontSize: 15,
+  },
+  value: {
+    color: "#ffffff",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  button: {
+    backgroundColor: "#ffffff",
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    alignItems: "center",
+    marginTop: 18,
+  },
+  buttonText: {
+    color: "#101114",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  secondaryButton: {
+    borderColor: "#ffffff",
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    alignItems: "center",
+    marginTop: 18,
+  },
+  secondaryButtonText: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  debugTitle: {
+    color: "#9ca3af",
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 8,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
+  debugText: {
+    color: "#d1d5db",
+    fontSize: 13,
+    lineHeight: 19,
+  },
 });
