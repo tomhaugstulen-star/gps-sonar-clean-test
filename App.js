@@ -4,7 +4,8 @@ import * as Location from "expo-location";
 import { Magnetometer } from "expo-sensors";
 
 const REBUS_RADIUS = 500;
-const REBUS_MAX_RADIUS = 2000;
+const REBUS_MAX_RADIUS = 10000;
+const REBUS_SEARCH_RADII = [500, 1000, 2000, 5000, 10000];
 const REBUS_FOUND_RADIUS = 25;
 const SONAR_RADIUS = 20;
 const SONAR_FOUND_RADIUS = 5;
@@ -17,6 +18,7 @@ const RA_URLS = [
 
 const toRad = (v) => (v * Math.PI) / 180;
 const toDeg = (v) => (v * 180) / Math.PI;
+const round5 = (v) => Number(v).toFixed(5);
 
 function distanceM(aLat, aLon, bLat, bLon) {
   const dLat = toRad(bLat - aLat);
@@ -54,7 +56,7 @@ function qs(params) {
 async function json(url) {
   const response = await fetch(url);
   const text = await response.text();
-  if (!response.ok) throw new Error(`${response.status}: ${text.slice(0, 80)}`);
+  if (!response.ok) throw new Error(`${response.status}: ${text.slice(0, 120)}`);
   return JSON.parse(text);
 }
 
@@ -67,8 +69,7 @@ function first(obj, keys) {
 }
 
 function kvPoint(item) {
-  const p = item?.representasjonspunkt || item?.geometry || item?.punkt;
-  if (!p) return null;
+  const p = item?.representasjonspunkt || item?.geometry || item?.punkt || item;
   const latitude = n(p.nord) ?? n(p.latitude) ?? n(p.lat) ?? n(p.y);
   const longitude = n(p.aust) ?? n(p["øst"]) ?? n(p.longitude) ?? n(p.lon) ?? n(p.lng) ?? n(p.x);
   return latitude !== null && longitude !== null ? { latitude, longitude } : null;
@@ -87,7 +88,15 @@ function kvName(item, index) {
 }
 
 async function fetchKartverket(lat, lon, radius) {
-  const url = `${KV_URL}?${qs([["nord", lat], ["aust", lon], ["radius", radius], ["koordsys", 4258], ["utkoordsys", 4258], ["treffPerSide", 50], ["side", 1]])}`;
+  const url = `${KV_URL}?${qs([
+    ["nord", lat],
+    ["aust", lon],
+    ["radius", radius],
+    ["koordsys", 4258],
+    ["utkoordsys", 4258],
+    ["treffPerSide", 100],
+    ["side", 1]
+  ])}`;
   const data = await json(url);
   const items = Array.isArray(data?.navn) ? data.navn : Array.isArray(data?.stedsnavn) ? data.stedsnavn : [];
   return items.map((raw, index) => {
@@ -99,14 +108,27 @@ async function fetchKartverket(lat, lon, radius) {
 }
 
 function raName(attributes, index) {
-  return first(attributes, ["navn", "NAVN", "lokalitetsnavn", "LOKALITETSNAVN", "enkeltminneart", "ENKELTMINNEART", "kulturminneart", "KULTURMINNEART"]) || `Kulturminne ${index + 1}`;
+  return first(attributes, ["navn", "NAVN", "lokalitetsnavn", "LOKALITETSNAVN", "enkeltminneart", "ENKELTMINNEART", "kulturminneart", "KULTURMINNEART", "art", "ART"]) || `Kulturminne ${index + 1}`;
 }
 
 async function fetchRiksantikvaren(lat, lon, radius) {
   const posts = [];
   for (const layer of RA_URLS) {
     try {
-      const url = `${layer}?${qs([["f", "json"], ["where", "OBJECTID IS NOT NULL"], ["outFields", "*"], ["returnGeometry", "true"], ["geometry", `${lon},${lat}`], ["geometryType", "esriGeometryPoint"], ["inSR", 4326], ["outSR", 4326], ["spatialRel", "esriSpatialRelIntersects"], ["distance", radius], ["units", "esriSRUnit_Meter"]])}`;
+      const url = `${layer}?${qs([
+        ["f", "json"],
+        ["where", "1=1"],
+        ["outFields", "*"],
+        ["returnGeometry", "true"],
+        ["geometry", `${lon},${lat}`],
+        ["geometryType", "esriGeometryPoint"],
+        ["inSR", 4326],
+        ["outSR", 4326],
+        ["spatialRel", "esriSpatialRelIntersects"],
+        ["distance", radius],
+        ["units", "esriSRUnit_Meter"],
+        ["resultRecordCount", 100]
+      ])}`;
       const data = await json(url);
       const features = Array.isArray(data?.features) ? data.features : [];
       features.forEach((feature, index) => {
@@ -126,9 +148,9 @@ function routeFrom(lat, lon, rawPosts, radius, count) {
   const seen = new Set();
   return rawPosts
     .map((post) => ({ ...post, distanceFromStart: distanceM(lat, lon, post.latitude, post.longitude) }))
-    .filter((post) => post.distanceFromStart >= 8 && post.distanceFromStart <= radius)
+    .filter((post) => post.distanceFromStart <= radius)
     .filter((post) => {
-      const key = `${post.source}:${post.name.toLowerCase()}:${post.latitude.toFixed(4)}:${post.longitude.toFixed(4)}`;
+      const key = `${post.source}:${String(post.name).toLowerCase()}:${post.latitude.toFixed(5)}:${post.longitude.toFixed(5)}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -200,7 +222,7 @@ async function ensureGpsPermission(setGpsStatus) {
   if (status.status === "granted") return true;
 
   const message = status.canAskAgain === false
-    ? "Telefonen sier at appen ikke kan spørre på nytt. Åpne innstillinger og gi posisjon til Expo Go."
+    ? "Telefonen sier at appen ikke kan spørre på nytt. Åpne innstillinger og gi posisjon til GPS og Gyro Test."
     : "Testen må ha GPS-tilgang.";
   Alert.alert("GPS ikke godkjent", message);
   return false;
@@ -213,51 +235,39 @@ async function getGpsFix(setGpsStatus) {
   return await new Promise((resolve) => {
     let settled = false;
     let sub = null;
-
     const finish = (value) => {
       if (settled) return;
       settled = true;
       if (sub) sub.remove();
       resolve(value);
     };
-
-    const timeout = setTimeout(() => {
-      finish(null);
-    }, 12000);
-
+    const timeout = setTimeout(() => finish(null), 12000);
     Location.watchPositionAsync(
       { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 0 },
       (next) => {
         clearTimeout(timeout);
         finish(next);
       }
-    )
-      .then((subscription) => {
-        sub = subscription;
-      })
-      .catch((error) => {
-        clearTimeout(timeout);
-        console.log("GPS first fix feilet:", error?.message || error);
-        Alert.alert("GPS feilet", "Telefonen nekter fortsatt GPS. Trykk Sjekk GPS-status og se hva status viser.");
-        finish(null);
-      });
+    ).then((subscription) => { sub = subscription; }).catch((error) => {
+      clearTimeout(timeout);
+      console.log("GPS first fix feilet:", error?.message || error);
+      Alert.alert("GPS feilet", "Telefonen nekter fortsatt GPS. Trykk Sjekk GPS-status og se hva status viser.");
+      finish(null);
+    });
   });
 }
 
 function SonarPulse({ distance, isClose }) {
   const pulse = useRef(new Animated.Value(1)).current;
-
   useEffect(() => {
     let interval = 1600;
     if (distance <= 5) interval = 420;
     else if (distance <= 8) interval = 620;
     else if (distance <= 14) interval = 950;
-
     const runPulse = () => {
       pulse.setValue(1);
       Animated.timing(pulse, { toValue: 3.8, duration: Math.min(interval, 700), easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
     };
-
     runPulse();
     const timer = setInterval(runPulse, interval);
     return () => clearInterval(timer);
@@ -297,21 +307,17 @@ export default function App() {
   useEffect(() => {
     const shouldTrack = screen === "REBUS" || (screen === "SONAR" && sonarSearching);
     if (!shouldTrack) return undefined;
-
     let gpsSub;
     let compassSub;
     let mounted = true;
-
     async function watch() {
       try {
         const allowed = await ensureGpsPermission(setGpsStatus);
         if (!allowed || !mounted) return;
-
         gpsSub = await Location.watchPositionAsync(
           { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 },
           (next) => mounted && setLocation(next)
         );
-
         if (screen === "SONAR") {
           Magnetometer.setUpdateInterval(150);
           compassSub = Magnetometer.addListener((data) => {
@@ -324,7 +330,6 @@ export default function App() {
         if (mounted) setStatus("GPS/kompass-sporing feilet. Sjekk GPS-status.");
       }
     }
-
     watch();
     return () => {
       mounted = false;
@@ -379,6 +384,16 @@ export default function App() {
     setStatus(route.length === 1 ? `1-post test klar. Gå til post 1: ${route[0].name}` : `Sløyfe klar. Gå til post 1: ${route[0].name}`);
   }
 
+  function startGpsFallbackPost() {
+    const current = startPoint || location;
+    if (!current) {
+      Alert.alert("Ingen GPS", "Start rebus-søk først, så appen har et startpunkt.");
+      return;
+    }
+    const point = randomPoint(current.coords.latitude, current.coords.longitude, 35);
+    startWithRoute([{ id: "gps-fallback-1", number: 1, found: false, source: "GPS-test", name: "Testpost nær deg", ...point, distanceFromStart: distanceM(current.coords.latitude, current.coords.longitude, point.latitude, point.longitude) }], 35);
+  }
+
   async function search(radiusToUse = REBUS_RADIUS, existingStartPoint = null) {
     setLoading(true);
     setPending(null);
@@ -386,8 +401,8 @@ export default function App() {
     setTreasures([]);
     setSonarSearching(false);
     setActiveIndex(0);
-    setStatus("Søker etter ekte poster...");
-    setApiStatus(`Søkeradius: ${radiusToUse} m`);
+    setStatus("Søker etter ekte poster. Prøver automatisk større radius hvis nødvendig...");
+    setApiStatus(`Starter søk ved ${radiusToUse} m`);
     try {
       const current = existingStartPoint || await getGpsFix(setGpsStatus);
       if (!current) {
@@ -399,26 +414,42 @@ export default function App() {
       setStartPoint(current);
       const lat = current.coords.latitude;
       const lon = current.coords.longitude;
-      const [kvResult, raResult] = await Promise.allSettled([fetchKartverket(lat, lon, radiusToUse), fetchRiksantikvaren(lat, lon, radiusToUse)]);
-      const kv = kvResult.status === "fulfilled" ? kvResult.value : [];
-      const ra = raResult.status === "fulfilled" ? raResult.value : [];
-      const all = [...kv, ...ra];
-      const two = routeFrom(lat, lon, all, radiusToUse, 2);
-      const one = routeFrom(lat, lon, all, radiusToUse, 1);
-      setScreen("REBUS");
-      setRadius(radiusToUse);
-      setApiStatus(`Radius: ${radiusToUse} m. Kartverket: ${kv.length}. Riksantikvaren: ${ra.length}.`);
-      if (two.length === 2) startWithRoute(two, radiusToUse);
-      else {
-        setPending({ one, canUseOne: one.length === 1, canSearchLarger: radiusToUse < REBUS_MAX_RADIUS, radius: radiusToUse });
-        if (one.length === 1) setStatus(`Fant bare 1 post innen ${radiusToUse} m. Velg større radius eller bruk 1 post.`);
-        else if (radiusToUse < REBUS_MAX_RADIUS) setStatus(`Fant ingen poster innen ${radiusToUse} m. Velg større radius.`);
-        else setStatus(`Fant ingen poster innen ${radiusToUse} m. Flytt deg og prøv igjen.`);
+      const accuracy = current.coords.accuracy ? `${Math.round(current.coords.accuracy)} m` : "ukjent";
+      const radii = REBUS_SEARCH_RADII.filter((r) => r >= radiusToUse);
+      let best = null;
+
+      for (const r of radii) {
+        setRadius(r);
+        setApiStatus(`GPS ${round5(lat)}, ${round5(lon)}. Nøyaktighet: ${accuracy}. Søker ${r} m...`);
+        const [kvResult, raResult] = await Promise.allSettled([fetchKartverket(lat, lon, r), fetchRiksantikvaren(lat, lon, r)]);
+        const kv = kvResult.status === "fulfilled" ? kvResult.value : [];
+        const ra = raResult.status === "fulfilled" ? raResult.value : [];
+        const all = [...kv, ...ra];
+        const two = routeFrom(lat, lon, all, r, 2);
+        const one = routeFrom(lat, lon, all, r, 1);
+        best = { radius: r, kv, ra, all, two, one, kvError: kvResult.reason?.message, raError: raResult.reason?.message };
+        setApiStatus(`GPS ${round5(lat)}, ${round5(lon)}. Radius: ${r} m. Kartverket rå: ${kv.length}. Riksantikvaren rå: ${ra.length}. Brukbare: ${routeFrom(lat, lon, all, r, 99).length}.`);
+        if (two.length === 2) {
+          setScreen("REBUS");
+          startWithRoute(two, r);
+          return;
+        }
+        if (one.length === 1 && r >= REBUS_MAX_RADIUS) break;
       }
+
+      setScreen("REBUS");
+      if (best?.one?.length === 1) {
+        setPending({ one: best.one, canUseOne: true, canSearchLarger: false, canUseGpsFallback: true, radius: best.radius });
+        setStatus(`Fant bare 1 brukbar post innen ${best.radius} m. Bruk 1 post, eller lag GPS-testpost.`);
+      } else {
+        setPending({ one: [], canUseOne: false, canSearchLarger: false, canUseGpsFallback: true, radius: best?.radius || radiusToUse });
+        setStatus(`Fant ingen brukbare API-poster opp til ${best?.radius || radiusToUse} m. GPS er OK, men API-et gir ingen treff her. Prøv GPS-testpost eller flytt deg litt.`);
+      }
+      setApiStatus(`GPS ${round5(lat)}, ${round5(lon)}. Nøyaktighet: ${accuracy}. Siste radius: ${best?.radius || radiusToUse} m. Kartverket rå: ${best?.kv?.length || 0}. Riksantikvaren rå: ${best?.ra?.length || 0}. Brukbare: ${best ? routeFrom(lat, lon, best.all, best.radius, 99).length : 0}.`);
     } catch (e) {
       console.log("Rebus feilet:", e?.message || e);
       Alert.alert("Rebus feilet", "Sjekk GPS-status og nettverk.");
-      setStatus("Klarte ikke starte API-test.");
+      setStatus(`Klarte ikke starte API-test: ${e?.message || e}`);
     } finally {
       setLoading(false);
     }
@@ -445,7 +476,6 @@ export default function App() {
         setStatus("Ingen GPS-fix. Trykk Sjekk GPS-status og kontroller tillatelsen.");
         return;
       }
-
       const lat = current.coords.latitude;
       const lon = current.coords.longitude;
       const nextTreasures = Array.from({ length: SONAR_COUNT }).map((_, index) => ({ id: `treasure-${index + 1}`, name: `Skatt ${index + 1}`, found: false, ...randomPoint(lat, lon, SONAR_RADIUS) }));
@@ -522,7 +552,6 @@ export default function App() {
 
   const foundCount = posts.filter((post) => post.found).length;
   const sonarFound = treasures.filter((t) => t.found).length;
-  const nextRadius = pending ? Math.min(pending.radius * 2, REBUS_MAX_RADIUS) : null;
 
   if (screen === "MENU") {
     return (
@@ -560,9 +589,9 @@ export default function App() {
             {pending ? (
               <View style={styles.choiceCard}>
                 <Text style={styles.choiceTitle}>Velg videre test</Text>
-                <Text style={styles.choiceText}>Samme startpunkt brukes. Du slipper å gå tilbake og starte på nytt.</Text>
-                {pending.canSearchLarger ? <TouchableOpacity style={styles.choiceButton} onPress={() => search(nextRadius, startPoint)} disabled={loading}><Text style={styles.choiceButtonText}>Søk større radius ({nextRadius} m)</Text></TouchableOpacity> : null}
-                {pending.canUseOne ? <TouchableOpacity style={[styles.choiceButton, styles.oneButton]} onPress={() => startWithRoute(pending.one, pending.radius)} disabled={loading}><Text style={styles.choiceButtonText}>Bruk 1 post</Text></TouchableOpacity> : null}
+                <Text style={styles.choiceText}>Hvis API-et ikke gir treff akkurat her, kan du fortsatt teste GPS-flyten med en lokal testpost.</Text>
+                {pending.canUseOne ? <TouchableOpacity style={[styles.choiceButton, styles.oneButton]} onPress={() => startWithRoute(pending.one, pending.radius)} disabled={loading}><Text style={styles.choiceButtonText}>Bruk 1 API-post</Text></TouchableOpacity> : null}
+                {pending.canUseGpsFallback ? <TouchableOpacity style={styles.choiceButton} onPress={startGpsFallbackPost} disabled={loading}><Text style={styles.choiceButtonText}>Lag GPS-testpost her</Text></TouchableOpacity> : null}
               </View>
             ) : null}
             {activePost && !activePost.found ? (
@@ -652,7 +681,7 @@ const styles = StyleSheet.create({
   choiceText: { color: "#334155", fontSize: 15, lineHeight: 21, textAlign: "center", marginTop: 6, marginBottom: 8 },
   choiceButton: { minHeight: 48, borderRadius: 14, backgroundColor: "#2563EB", alignItems: "center", justifyContent: "center", marginTop: 10 },
   oneButton: { backgroundColor: "#10B981" },
-  choiceButtonText: { color: "#FFFFFF", fontSize: 16, fontWeight: "900" },
+  choiceButtonText: { color: "#FFFFFF", fontSize: 16, fontWeight: "900", textAlign: "center" },
   postCard: { width: "100%", backgroundColor: "#F8FAFC", borderColor: "#E2E8F0", borderWidth: 1, borderRadius: 16, padding: 16, marginTop: 18 },
   source: { color: "#2563EB", fontSize: 13, fontWeight: "900", textTransform: "uppercase", marginBottom: 5 },
   postName: { color: "#0F172A", fontSize: 19, lineHeight: 25, fontWeight: "900", marginBottom: 10 },
