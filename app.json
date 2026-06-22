@@ -21,6 +21,10 @@
       }
     },
     "android": {
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -34,7 +38,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Tillat at appen bruker GPS for å finne skatter når den er åpen."
+          "locationWhenInUsePermission": "Tillat at appen bruker GPS for å finne poster når den er åpen."
         }
       ]
     ]
