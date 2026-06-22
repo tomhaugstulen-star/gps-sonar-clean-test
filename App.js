@@ -1,92 +1,220 @@
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { SafeAreaView, StyleSheet, Text, View } from "react-native";
-import MapView, { Marker, Polyline } from "react-native-maps";
+import MapView, { Circle, Marker } from "react-native-maps";
+import * as Location from "expo-location";
 
 /**
- * KART FØRST
+ * KART + GPS-TEST
  *
- * Dette er kun en minimal native kart-test.
- * Ingen GPS-logikk, ingen radius, ingen rebusflyt.
- * Når dette virker i iPhone dev build, bygger vi videre ett steg om gangen.
+ * Dette er fortsatt kun testgrunnlaget.
+ * Ingen rebusflyt, ingen spørsmål, ingen poståpning.
  *
- * Dummy-koordinater. Ikke legg inn private hjemmepunkter i repo.
+ * Appen henter telefonens GPS-posisjon og lager én testpost 50 meter nord for deg.
+ * Din faktiske posisjon lagres ikke i repo. Posten beregnes lokalt på telefonen.
  */
-const TEST_POSTS = [
-  {
-    id: "post-1",
-    title: "Post 1",
-    latitude: 59.91095,
-    longitude: 10.7532,
-  },
-  {
-    id: "post-2",
-    title: "Post 2",
-    latitude: 59.91125,
-    longitude: 10.75385,
-  },
-  {
-    id: "post-3",
-    title: "Post 3",
-    latitude: 59.91095,
-    longitude: 10.7545,
-  },
-  {
-    id: "post-4",
-    title: "Post 4",
-    latitude: 59.91065,
-    longitude: 10.75385,
-  },
-];
+const TEST_DISTANCE_METERS = 50;
+const EARTH_RADIUS_METERS = 6371000;
 
-function makeInitialRegion() {
-  const latitudes = TEST_POSTS.map((post) => post.latitude);
-  const longitudes = TEST_POSTS.map((post) => post.longitude);
+function toDegrees(radians) {
+  return radians * (180 / Math.PI);
+}
 
-  const minLat = Math.min(...latitudes);
-  const maxLat = Math.max(...latitudes);
-  const minLon = Math.min(...longitudes);
-  const maxLon = Math.max(...longitudes);
+function toRadians(degrees) {
+  return degrees * (Math.PI / 180);
+}
+
+function destinationPoint(start, distanceMeters, bearingDegrees) {
+  const bearing = toRadians(bearingDegrees);
+  const angularDistance = distanceMeters / EARTH_RADIUS_METERS;
+  const lat1 = toRadians(start.latitude);
+  const lon1 = toRadians(start.longitude);
+
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angularDistance) +
+      Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearing)
+  );
+
+  const lon2 =
+    lon1 +
+    Math.atan2(
+      Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
+      Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2)
+    );
 
   return {
-    latitude: (minLat + maxLat) / 2,
-    longitude: (minLon + maxLon) / 2,
-    latitudeDelta: Math.max((maxLat - minLat) * 3, 0.004),
-    longitudeDelta: Math.max((maxLon - minLon) * 3, 0.004),
+    latitude: toDegrees(lat2),
+    longitude: toDegrees(lon2),
   };
 }
 
+function makeRegion(currentPosition, testPost) {
+  if (!currentPosition) {
+    return {
+      latitude: 59.91095,
+      longitude: 10.7532,
+      latitudeDelta: 0.004,
+      longitudeDelta: 0.004,
+    };
+  }
+
+  if (!testPost) {
+    return {
+      latitude: currentPosition.latitude,
+      longitude: currentPosition.longitude,
+      latitudeDelta: 0.003,
+      longitudeDelta: 0.003,
+    };
+  }
+
+  return {
+    latitude: (currentPosition.latitude + testPost.latitude) / 2,
+    longitude: (currentPosition.longitude + testPost.longitude) / 2,
+    latitudeDelta: 0.003,
+    longitudeDelta: 0.003,
+  };
+}
+
+function formatMeters(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "ukjent";
+  }
+
+  return `${Math.round(value)} m`;
+}
+
 export default function App() {
-  const routeLine = TEST_POSTS.map((post) => ({
-    latitude: post.latitude,
-    longitude: post.longitude,
-  }));
+  const [status, setStatus] = useState("Starter GPS...");
+  const [location, setLocation] = useState(null);
+
+  useEffect(() => {
+    let subscription;
+    let mounted = true;
+
+    async function startGps() {
+      try {
+        const servicesEnabled = await Location.hasServicesEnabledAsync();
+
+        if (!servicesEnabled) {
+          setStatus("GPS er av. Slå på posisjonstjenester.");
+          return;
+        }
+
+        const permission = await Location.requestForegroundPermissionsAsync();
+
+        if (permission.status !== "granted") {
+          setStatus("GPS-tillatelse mangler.");
+          return;
+        }
+
+        setStatus("GPS aktiv. Henter posisjon...");
+
+        const firstFix = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.High,
+        });
+
+        if (mounted) {
+          setLocation(firstFix);
+          setStatus("GPS aktiv.");
+        }
+
+        subscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.High,
+            timeInterval: 1000,
+            distanceInterval: 1,
+          },
+          (nextLocation) => {
+            if (mounted) {
+              setLocation(nextLocation);
+              setStatus("GPS aktiv.");
+            }
+          }
+        );
+      } catch (error) {
+        console.log("GPS-feil:", error?.message || error);
+        if (mounted) {
+          setStatus("GPS-feil. Se Metro-logg.");
+        }
+      }
+    }
+
+    startGps();
+
+    return () => {
+      mounted = false;
+      if (subscription) subscription.remove();
+    };
+  }, []);
+
+  const currentPosition = location
+    ? {
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+      }
+    : null;
+
+  const testPost = useMemo(() => {
+    if (!currentPosition) return null;
+
+    return {
+      id: "post-50m",
+      title: "Testpost 50 m nord",
+      ...destinationPoint(currentPosition, TEST_DISTANCE_METERS, 0),
+    };
+  }, [currentPosition]);
+
+  const region = useMemo(() => makeRegion(currentPosition, testPost), [currentPosition, testPost]);
 
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.kicker}>Kart-test</Text>
-        <Text style={styles.title}>Manuell Rebus-rute</Text>
+        <Text style={styles.kicker}>Kart + GPS-test</Text>
+        <Text style={styles.title}>Én post 50 meter unna</Text>
         <Text style={styles.bodyText}>
-          Første steg: få native kart til å vises i dev builden.
+          Posten beregnes lokalt fra din GPS-posisjon. Ingen private koordinater er hardkodet.
         </Text>
+        <Text style={styles.statusText}>{status}</Text>
       </View>
 
-      <MapView style={styles.map} initialRegion={makeInitialRegion()}>
-        <Polyline coordinates={routeLine} strokeWidth={4} strokeColor="#2563eb" />
-
-        {TEST_POSTS.map((post, index) => (
+      <MapView
+        style={styles.map}
+        region={region}
+        showsUserLocation={!!currentPosition}
+        showsMyLocationButton
+      >
+        {currentPosition ? (
           <Marker
-            key={post.id}
-            coordinate={{ latitude: post.latitude, longitude: post.longitude }}
-            title={`${index + 1}. ${post.title}`}
-            description={`${post.latitude.toFixed(5)}, ${post.longitude.toFixed(5)}`}
+            coordinate={currentPosition}
+            title="Din GPS-posisjon"
+            description={`Nøyaktighet: ${formatMeters(location?.coords?.accuracy)}`}
+            pinColor="blue"
           />
-        ))}
+        ) : null}
+
+        {testPost ? (
+          <>
+            <Circle
+              center={{ latitude: testPost.latitude, longitude: testPost.longitude }}
+              radius={15}
+              strokeColor="#f97316"
+              fillColor="rgba(249, 115, 22, 0.18)"
+            />
+            <Marker
+              coordinate={{ latitude: testPost.latitude, longitude: testPost.longitude }}
+              title={testPost.title}
+              description="Beregnet 50 meter nord for din posisjon"
+              pinColor="orange"
+            />
+          </>
+        ) : null}
       </MapView>
 
       <View style={styles.footer}>
-        <Text style={styles.footerTitle}>Forventet resultat</Text>
-        <Text style={styles.bodyText}>Kart + 4 markører + blå linje mellom postene.</Text>
+        <Text style={styles.footerTitle}>Testkriterium</Text>
+        <Text style={styles.bodyText}>
+          Du skal se din posisjon og én oransje post ca. 50 meter nord for deg.
+        </Text>
+        <Text style={styles.debugText}>GPS-nøyaktighet: {formatMeters(location?.coords?.accuracy)}</Text>
       </View>
     </SafeAreaView>
   );
@@ -121,6 +249,12 @@ const styles = StyleSheet.create({
     lineHeight: 21,
     marginTop: 8,
   },
+  statusText: {
+    color: "#ffffff",
+    fontSize: 15,
+    fontWeight: "800",
+    marginTop: 10,
+  },
   map: {
     flex: 1,
   },
@@ -135,5 +269,11 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontSize: 16,
     fontWeight: "800",
+  },
+  debugText: {
+    color: "#9ca3af",
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 8,
   },
 });
