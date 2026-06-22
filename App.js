@@ -20,17 +20,19 @@ import * as Location from "expo-location";
  * - Ikke legg inn hjemmekoordinater eller hjemmenære GPS-punkter i repo.
  * - Bytt disse lokalt med egne poster når du tester fysisk.
  * - Hold faktiske poster unna privat bolig, hytte, arbeidssted eller andre sensitive mønstre.
+ *
+ * Test-ruten under er lagt som en kort runde på ca. 200 meter totalt.
  */
 const TEST_ROUTE = {
   id: "manual-test-route-001",
-  name: "Manuell Rebus-test",
+  name: "Manuell Rebus-test, ca. 200 m",
   posts: [
     {
       id: "post-1",
       title: "Post 1",
-      latitude: 59.9109,
-      longitude: 10.7532,
-      radius: 50,
+      latitude: 59.91095,
+      longitude: 10.75320,
+      radius: 35,
       hint: "Gå til første testpunkt.",
       question: "Hva ser du ved første post?",
       answer: "placeholder",
@@ -38,9 +40,9 @@ const TEST_ROUTE = {
     {
       id: "post-2",
       title: "Post 2",
-      latitude: 59.9075,
-      longitude: 10.7532,
-      radius: 45,
+      latitude: 59.91125,
+      longitude: 10.75385,
+      radius: 35,
       hint: "Fortsett til neste punkt.",
       question: "Hva er kjennetegnet ved dette stedet?",
       answer: "placeholder",
@@ -48,9 +50,9 @@ const TEST_ROUTE = {
     {
       id: "post-3",
       title: "Post 3",
-      latitude: 59.908,
-      longitude: 10.756,
-      radius: 40,
+      latitude: 59.91095,
+      longitude: 10.75450,
+      radius: 35,
       hint: "Du nærmer deg tredje punkt.",
       question: "Hvilket bygg eller landemerke er nærmest?",
       answer: "placeholder",
@@ -58,9 +60,9 @@ const TEST_ROUTE = {
     {
       id: "post-4",
       title: "Post 4",
-      latitude: 59.9069,
-      longitude: 10.7364,
-      radius: 50,
+      latitude: 59.91065,
+      longitude: 10.75385,
+      radius: 35,
       hint: "Siste post i ruten.",
       question: "Hva er sluttordet for ruten?",
       answer: "placeholder",
