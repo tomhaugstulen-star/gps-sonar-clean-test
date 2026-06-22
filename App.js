@@ -172,18 +172,28 @@ function randomPoint(lat, lon, maxRadius) {
   return { latitude: toDeg(pointLat), longitude: toDeg(pointLon) };
 }
 
+function sonarTempo(distance) {
+  if (distance === null || distance === undefined) return { interval: 1900, scale: 2.2, label: "venter" };
+  if (distance <= SONAR_FOUND_RADIUS) return { interval: 260, scale: 5.2, label: "260 ms" };
+  if (distance <= 8) return { interval: 420, scale: 4.7, label: "420 ms" };
+  if (distance <= 14) return { interval: 850, scale: 3.8, label: "850 ms" };
+  if (distance <= 22) return { interval: 1450, scale: 3.0, label: "1,45 s" };
+  return { interval: 2100, scale: 2.4, label: "2,1 s" };
+}
+
 function sonarSignal(distance) {
-  if (distance === null || distance === undefined) return { label: "Søker", helper: "Venter på GPS-signal.", pulse: "Signal søker" };
-  if (distance <= SONAR_FOUND_RADIUS) return { label: "Svært nær", helper: "Skatten er svært nær. Se deg rolig rundt.", pulse: "Pulsen er svært tett" };
-  if (distance <= 8) return { label: "Sterkt signal", helper: "Sterkt signal. Utforsk nærområdet rolig.", pulse: "Pulsen øker" };
-  if (distance <= 14) return { label: "Middels signal", helper: "Signalet øker. Du nærmer deg.", pulse: "Du nærmer deg" };
-  return { label: "Svakt signal", helper: "Beveg deg rolig i søkeområdet.", pulse: "Signal søker" };
+  const tempo = sonarTempo(distance);
+  if (distance === null || distance === undefined) return { label: "Søker", helper: "Venter på GPS-signal.", pulse: "Ingen stabil puls ennå", tempo };
+  if (distance <= SONAR_FOUND_RADIUS) return { label: "SVÆRT NÆR 4/4", helper: "Svært sterkt signal. Pulsen skal gå nesten kontinuerlig.", pulse: `Rask puls: ${tempo.label}`, tempo };
+  if (distance <= 8) return { label: "STERKT 3/4", helper: "Sterkt signal. Kort pause mellom pulsene.", pulse: `Tett puls: ${tempo.label}`, tempo };
+  if (distance <= 14) return { label: "MIDDELS 2/4", helper: "Middels signal. Pulsen går merkbart saktere.", pulse: `Middels puls: ${tempo.label}`, tempo };
+  return { label: "SVAKT 1/4", helper: "Svakt signal. Lange pauser mellom pulsene.", pulse: `Langsom puls: ${tempo.label}`, tempo };
 }
 
 function signalPercent(distance) {
-  if (distance === null || distance === undefined) return "12%";
-  const percent = 100 - (distance / 80) * 100;
-  return `${Math.max(12, Math.min(96, Math.round(percent)))}%`;
+  if (distance === null || distance === undefined) return "8%";
+  const percent = 100 - (distance / SONAR_RADIUS) * 100;
+  return `${Math.max(8, Math.min(100, Math.round(percent)))}%`;
 }
 
 async function readGpsStatus() {
@@ -259,27 +269,30 @@ async function getGpsFix(setGpsStatus) {
 
 function SonarPulse({ distance, isClose }) {
   const pulse = useRef(new Animated.Value(1)).current;
+  const tempo = sonarTempo(distance);
+
   useEffect(() => {
-    let interval = 1600;
-    if (distance <= 5) interval = 420;
-    else if (distance <= 8) interval = 620;
-    else if (distance <= 14) interval = 950;
     const runPulse = () => {
       pulse.setValue(1);
-      Animated.timing(pulse, { toValue: 3.8, duration: Math.min(interval, 700), easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
+      Animated.timing(pulse, {
+        toValue: tempo.scale,
+        duration: Math.min(Math.round(tempo.interval * 0.62), 900),
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true
+      }).start();
     };
     runPulse();
-    const timer = setInterval(runPulse, interval);
+    const timer = setInterval(runPulse, tempo.interval);
     return () => clearInterval(timer);
-  }, [distance, pulse]);
+  }, [tempo.interval, tempo.scale, pulse]);
 
   return (
     <View style={styles.sonarWrap}>
-      <Animated.View style={[styles.sonarWave, { transform: [{ scale: pulse }], opacity: pulse.interpolate({ inputRange: [1, 3.8], outputRange: [0.68, 0] }) }]} />
+      <Animated.View style={[styles.sonarWave, { transform: [{ scale: pulse }], opacity: pulse.interpolate({ inputRange: [1, tempo.scale], outputRange: [0.82, 0] }) }]} />
       <View style={styles.sonarRingOuter} />
       <View style={styles.sonarRingMid} />
       <View style={styles.sonarRingInner} />
-      <View style={[styles.sonarCore, isClose && styles.sonarCoreClose]} />
+      <View style={[styles.sonarCore, distance <= 14 && styles.sonarCoreMedium, distance <= 8 && styles.sonarCoreStrong, isClose && styles.sonarCoreClose]} />
     </View>
   );
 }
@@ -482,7 +495,7 @@ export default function App() {
       setLocation(current);
       setTreasures(nextTreasures);
       setSonarSearching(true);
-      setStatus("Sonar søker. Legg mobilen i lomma eller hold den rolig og følg signalet.");
+      setStatus("Sonar søker. Hold mobilen rolig og gå sakte. Svak puls er treg, sterk puls er rask.");
     } catch (e) {
       console.log("Sonar feilet:", e?.message || e);
       Alert.alert("Sonar feilet", "Sjekk GPS-status og prøv igjen ute.");
@@ -533,7 +546,7 @@ export default function App() {
   useEffect(() => {
     if (screen !== "SONAR" || !sonarSearching || !closestTreasure) return;
     const direction = closestTreasure.diff <= 35 ? "Riktig retning" : "Snu deg rolig rundt";
-    setStatus(`${sonar.helper} ${direction}.`);
+    setStatus(`${sonar.helper} ${direction}`);
   }, [screen, sonarSearching, closestTreasure, sonar.helper]);
 
   function reset() {
@@ -609,24 +622,25 @@ export default function App() {
             <View style={styles.sonarHeaderRow}>
               <View>
                 <Text style={styles.cardTitle}>SONAR</Text>
-                <Text style={styles.cardSubtitle}>Lyd- og signalvisning</Text>
+                <Text style={styles.cardSubtitle}>Signaltempo styres av avstand</Text>
               </View>
               <View style={styles.badge}><Text style={styles.badgeText}>{sonar.label}</Text></View>
             </View>
-            <Text style={styles.modeText}>Legg mobilen i lomma og følg signalet. Jo sterkere pulsen blir, jo nærmere er du.</Text>
+            <Text style={styles.modeText}>Gå sakte. Svak puls = langt unna. Rask puls = nærme. Grønn kjerne = åpne skatten.</Text>
             <SonarPulse distance={closestTreasure?.distance} isClose={canOpenTreasure} />
             <View style={styles.metricGrid}>
               <View style={styles.metricBox}><Text style={styles.metricLabel}>Signalnivå</Text><Text style={styles.metricValue}>{sonar.label}</Text></View>
-              <View style={styles.metricBox}><Text style={styles.metricLabel}>Puls</Text><Text style={styles.metricValue}>{sonar.pulse}</Text></View>
+              <View style={styles.metricBox}><Text style={styles.metricLabel}>Pulsfart</Text><Text style={styles.metricValue}>{sonar.pulse}</Text></View>
             </View>
             <View style={styles.signalBar}><View style={[styles.signalFill, { width: signalPercent(closestTreasure?.distance) }, closestTreasure?.distance <= 14 && styles.signalFillOn, closestTreasure?.distance <= 8 && styles.signalFillStrong, closestTreasure?.distance <= 5 && styles.signalFillVeryStrong]} /></View>
             <Text style={styles.meta}>Skatter funnet: {sonarFound} / {treasures.length}</Text>
             <Text style={styles.meta}>Nærmeste: {closestTreasure ? `${Math.round(closestTreasure.distance)} m` : "ingen aktiv skatt"}</Text>
+            <Text style={styles.meta}>Tempo: {sonar.tempo?.label || "venter"}</Text>
             <Text style={styles.meta}>Retning: {closestTreasure ? directionText(closestTreasure.bearing) : "ingen"}</Text>
             <Text style={styles.meta}>Peker mot skatt: {closestTreasure ? `${Math.round(closestTreasure.diff)}° avvik` : "ingen"}</Text>
             <Text style={styles.meta}>Kompass heading: {Math.round(heading)}°</Text>
             <Text style={styles.meta}>GPS-nøyaktighet: {location?.coords?.accuracy ? `${Math.round(location.coords.accuracy)} m` : "ukjent"}</Text>
-            {canOpenTreasure ? <View style={styles.readyBox}><Text style={styles.readyTitle}>Skatten er svært nær</Text><Text style={styles.readyText}>Se deg rolig rundt. Åpne skatten når du har funnet stedet.</Text></View> : <Text style={styles.helperText}>Skatten kan åpnes når du er svært nær.</Text>}
+            {canOpenTreasure ? <View style={styles.readyBox}><Text style={styles.readyTitle}>Skatten er svært nær</Text><Text style={styles.readyText}>Pulsen er på maks. Åpne skatten når du har funnet stedet.</Text></View> : <Text style={styles.helperText}>Skatten kan åpnes når du er svært nær.</Text>}
             <TouchableOpacity style={styles.secondaryButton} onPress={startSonarSearch} disabled={loading}><Text style={styles.secondaryButtonText}>Søk etter skatt</Text></TouchableOpacity>
             <TouchableOpacity style={styles.secondaryButton} onPress={stopSonarSearch} disabled={!sonarSearching}><Text style={styles.secondaryButtonText}>Stopp søk</Text></TouchableOpacity>
             <TouchableOpacity style={[styles.primaryButton, !canOpenTreasure && styles.primaryButtonDisabled]} onPress={openTreasure} disabled={!canOpenTreasure}><Text style={[styles.primaryButtonText, !canOpenTreasure && styles.primaryButtonTextDisabled]}>Åpne skatt</Text></TouchableOpacity>
@@ -693,20 +707,22 @@ const styles = StyleSheet.create({
   badgeText: { color: "#FDE68A", fontSize: 12, fontWeight: "900" },
   modeText: { color: "#E2E8F0", fontSize: 15, lineHeight: 22, marginBottom: 16, textAlign: "center" },
   sonarWrap: { width: 290, height: 290, marginTop: 18, marginBottom: 28, alignItems: "center", justifyContent: "center" },
-  sonarWave: { width: 60, height: 60, borderRadius: 30, borderWidth: 2, borderColor: "#F59E0B", backgroundColor: "rgba(245, 158, 11, 0.10)", position: "absolute" },
+  sonarWave: { width: 60, height: 60, borderRadius: 30, borderWidth: 3, borderColor: "#F59E0B", backgroundColor: "rgba(245, 158, 11, 0.14)", position: "absolute" },
   sonarRingOuter: { position: "absolute", width: 278, height: 278, borderRadius: 139, borderWidth: 2, borderColor: "rgba(245, 158, 11, 0.45)" },
   sonarRingMid: { position: "absolute", width: 212, height: 212, borderRadius: 106, borderWidth: 2, borderColor: "rgba(245, 158, 11, 0.45)" },
   sonarRingInner: { position: "absolute", width: 144, height: 144, borderRadius: 72, borderWidth: 2, borderColor: "rgba(245, 158, 11, 0.45)" },
-  sonarCore: { width: 62, height: 62, borderRadius: 31, backgroundColor: "#F59E0B", shadowColor: "#F59E0B", shadowOpacity: 0.35, shadowRadius: 14, elevation: 8 },
-  sonarCoreClose: { backgroundColor: "#22C55E" },
+  sonarCore: { width: 56, height: 56, borderRadius: 28, backgroundColor: "#64748B", shadowColor: "#64748B", shadowOpacity: 0.25, shadowRadius: 10, elevation: 5 },
+  sonarCoreMedium: { width: 62, height: 62, borderRadius: 31, backgroundColor: "#F59E0B", shadowColor: "#F59E0B", shadowOpacity: 0.35, shadowRadius: 14, elevation: 8 },
+  sonarCoreStrong: { width: 72, height: 72, borderRadius: 36, backgroundColor: "#F97316", shadowColor: "#F97316", shadowOpacity: 0.55, shadowRadius: 18, elevation: 10 },
+  sonarCoreClose: { width: 84, height: 84, borderRadius: 42, backgroundColor: "#22C55E", shadowColor: "#22C55E", shadowOpacity: 0.75, shadowRadius: 24, elevation: 12 },
   metricGrid: { width: "100%", flexDirection: "row", gap: 12, marginBottom: 12 },
   metricBox: { flex: 1, backgroundColor: "#334155", borderRadius: 16, padding: 14 },
   metricLabel: { color: "#94A3B8", fontSize: 12, fontWeight: "800", marginBottom: 5 },
   metricValue: { color: "#E2E8F0", fontSize: 16, fontWeight: "900" },
-  signalBar: { width: "100%", height: 16, borderRadius: 999, backgroundColor: "#334155", overflow: "hidden", marginTop: 10, marginBottom: 12 },
-  signalFill: { height: "100%", backgroundColor: "#475569" },
-  signalFillOn: { backgroundColor: "#94A3B8" },
-  signalFillStrong: { backgroundColor: "#F59E0B" },
+  signalBar: { width: "100%", height: 20, borderRadius: 999, backgroundColor: "#334155", overflow: "hidden", marginTop: 10, marginBottom: 12 },
+  signalFill: { height: "100%", backgroundColor: "#64748B" },
+  signalFillOn: { backgroundColor: "#FBBF24" },
+  signalFillStrong: { backgroundColor: "#F97316" },
   signalFillVeryStrong: { backgroundColor: "#22C55E" },
   helperText: { color: "#94A3B8", fontSize: 14, lineHeight: 20, marginVertical: 12, textAlign: "center" },
   readyBox: { width: "100%", backgroundColor: "rgba(34, 197, 94, 0.14)", borderRadius: 16, padding: 16, marginVertical: 12, borderWidth: 1, borderColor: "rgba(34, 197, 94, 0.42)" },
