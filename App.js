@@ -9,7 +9,6 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import MapView, { Circle, Marker, Polyline } from "react-native-maps";
 import * as Location from "expo-location";
 
 /**
@@ -97,39 +96,37 @@ function formatMeters(value) {
   return `${Math.round(value)} m`;
 }
 
-function routeCoordinates() {
-  return TEST_ROUTE.posts.map((post) => ({
-    latitude: post.latitude,
-    longitude: post.longitude,
-  }));
+function formatCoordinate(post) {
+  return `${post.latitude.toFixed(5)}, ${post.longitude.toFixed(5)}`;
 }
 
-function makeRouteRegion(location) {
-  const routePoints = routeCoordinates();
-  const points = location
-    ? [
-        ...routePoints,
-        {
-          latitude: location.coords.latitude,
-          longitude: location.coords.longitude,
-        },
-      ]
-    : routePoints;
+function makeGoogleMapsRouteUrl() {
+  const posts = TEST_ROUTE.posts;
+  const origin = `${posts[0].latitude},${posts[0].longitude}`;
+  const destinationPost = posts[posts.length - 1];
+  const destination = `${destinationPost.latitude},${destinationPost.longitude}`;
+  const waypoints = posts
+    .slice(1, -1)
+    .map((post) => `${post.latitude},${post.longitude}`)
+    .join("|");
 
-  const latitudes = points.map((point) => point.latitude);
-  const longitudes = points.map((point) => point.longitude);
+  const params = [
+    "api=1",
+    `origin=${encodeURIComponent(origin)}`,
+    `destination=${encodeURIComponent(destination)}`,
+    "travelmode=walking",
+  ];
 
-  const minLat = Math.min(...latitudes);
-  const maxLat = Math.max(...latitudes);
-  const minLon = Math.min(...longitudes);
-  const maxLon = Math.max(...longitudes);
+  if (waypoints) {
+    params.push(`waypoints=${encodeURIComponent(waypoints)}`);
+  }
 
-  const latitude = (minLat + maxLat) / 2;
-  const longitude = (minLon + maxLon) / 2;
-  const latitudeDelta = Math.max((maxLat - minLat) * 2.4, 0.004);
-  const longitudeDelta = Math.max((maxLon - minLon) * 2.4, 0.004);
+  return `https://www.google.com/maps/dir/?${params.join("&")}`;
+}
 
-  return { latitude, longitude, latitudeDelta, longitudeDelta };
+function makeAppleMapsPointUrl(post) {
+  const query = encodeURIComponent(`${post.title} ${post.latitude},${post.longitude}`);
+  return `http://maps.apple.com/?ll=${post.latitude},${post.longitude}&q=${query}`;
 }
 
 async function readGpsStatus() {
@@ -222,7 +219,7 @@ export default function App() {
           .catch((error) => {
             console.log("Første GPS-posisjon feilet:", error?.message || error);
             if (mounted) {
-              setStatus("Kart vises. Venter fortsatt på GPS-posisjon.");
+              setStatus("Venter fortsatt på GPS-posisjon.");
             }
           });
 
@@ -242,7 +239,7 @@ export default function App() {
       } catch (error) {
         console.log("GPS-sporing feilet:", error?.message || error);
         if (mounted) {
-          setStatus("Kart vises. GPS-sporing feilet. Sjekk GPS-status.");
+          setStatus("GPS-sporing feilet. Sjekk GPS-status.");
         }
       }
     }
@@ -265,9 +262,6 @@ export default function App() {
       activePost.longitude
     );
   }, [location, activePost]);
-
-  const mapRegion = useMemo(() => makeRouteRegion(location), [location]);
-  const routeLine = useMemo(() => routeCoordinates(), []);
 
   const activePostIsOpen = !!activePost && openedPostIds.includes(activePost.id);
   const withinRadius =
@@ -294,6 +288,19 @@ export default function App() {
     Linking.openSettings().catch(() => {});
   }
 
+  function openRouteMap() {
+    Linking.openURL(makeGoogleMapsRouteUrl()).catch(() => {
+      Alert.alert("Kart feilet", "Kunne ikke åpne kartlenken.");
+    });
+  }
+
+  function openActivePostMap() {
+    if (!activePost) return;
+    Linking.openURL(makeAppleMapsPointUrl(activePost)).catch(() => {
+      Alert.alert("Kart feilet", "Kunne ikke åpne aktiv post i kart.");
+    });
+  }
+
   const gpsAccuracy = location?.coords?.accuracy;
   const routeStatus = routeCompleted
     ? "Ruten er fullført"
@@ -307,42 +314,36 @@ export default function App() {
         <Text style={styles.kicker}>Rebus GPS-test</Text>
         <Text style={styles.title}>{TEST_ROUTE.name}</Text>
 
-        <View style={styles.mapCard}>
-          <MapView
-            style={styles.map}
-            initialRegion={mapRegion}
-            region={mapRegion}
-            showsUserLocation={gpsStatus?.status === "granted"}
-            showsMyLocationButton={gpsStatus?.status === "granted"}
-            loadingEnabled
-          >
-            <Polyline coordinates={routeLine} strokeWidth={4} strokeColor="#2563eb" />
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Testkart</Text>
+          <Text style={styles.bodyText}>
+            Native kart er ikke aktivert i denne dev builden. Bruk kartlenkene under for å se test-ruten og aktiv post.
+          </Text>
 
+          <TouchableOpacity style={styles.button} onPress={openRouteMap} activeOpacity={0.8}>
+            <Text style={styles.buttonText}>Åpne hele ruten i kart</Text>
+          </TouchableOpacity>
+
+          {!routeCompleted ? (
+            <TouchableOpacity style={styles.secondaryButton} onPress={openActivePostMap} activeOpacity={0.8}>
+              <Text style={styles.secondaryButtonText}>Åpne aktiv post i Apple Maps</Text>
+            </TouchableOpacity>
+          ) : null}
+
+          <View style={styles.postList}>
             {TEST_ROUTE.posts.map((post, index) => {
               const isActive = activePost?.id === post.id;
               const isOpened = openedPostIds.includes(post.id);
 
               return (
-                <React.Fragment key={post.id}>
-                  <Circle
-                    center={{ latitude: post.latitude, longitude: post.longitude }}
-                    radius={post.radius}
-                    strokeColor={isActive ? "#f97316" : "#2563eb"}
-                    fillColor={isActive ? "rgba(249, 115, 22, 0.18)" : "rgba(37, 99, 235, 0.12)"}
-                  />
-                  <Marker
-                    coordinate={{ latitude: post.latitude, longitude: post.longitude }}
-                    title={`${index + 1}. ${post.title}`}
-                    description={isOpened ? "Post åpnet" : isActive ? "Aktiv post" : "Ikke åpnet"}
-                    pinColor={isOpened ? "green" : isActive ? "orange" : "red"}
-                  />
-                </React.Fragment>
+                <View key={post.id} style={styles.postListRow}>
+                  <Text style={styles.postListTitle}>
+                    {index + 1}. {post.title}{isActive ? " · aktiv" : ""}{isOpened ? " · åpnet" : ""}
+                  </Text>
+                  <Text style={styles.debugText}>{formatCoordinate(post)} · radius {post.radius} m</Text>
+                </View>
               );
             })}
-          </MapView>
-          <View style={styles.mapLegend}>
-            <Text style={styles.mapLegendText}>Kartet viser test-ruten uavhengig av GPS-fix.</Text>
-            <Text style={styles.mapLegendText}>Oransje = aktiv post. Grønn = åpnet post.</Text>
           </View>
         </View>
 
@@ -356,7 +357,7 @@ export default function App() {
           <View style={styles.card}>
             <Text style={styles.cardTitle}>GPS-tilgang mangler</Text>
             <Text style={styles.bodyText}>
-              Appen trenger posisjonstilgang for å teste Rebus-flyten. Kartet kan likevel vise test-ruten.
+              Appen trenger posisjonstilgang for å teste Rebus-flyten. Kartlenkene virker likevel.
             </Text>
             <TouchableOpacity style={styles.secondaryButton} onPress={openSettings} activeOpacity={0.8}>
               <Text style={styles.secondaryButtonText}>Åpne innstillinger</Text>
@@ -467,32 +468,6 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     marginBottom: 4,
   },
-  mapCard: {
-    height: 320,
-    borderRadius: 16,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "#2d3340",
-    backgroundColor: "#1c1f26",
-  },
-  map: {
-    flex: 1,
-  },
-  mapLegend: {
-    position: "absolute",
-    left: 10,
-    right: 10,
-    bottom: 10,
-    backgroundColor: "rgba(16, 17, 20, 0.86)",
-    borderRadius: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-  },
-  mapLegendText: {
-    color: "#ffffff",
-    fontSize: 12,
-    fontWeight: "700",
-  },
   card: {
     backgroundColor: "#1c1f26",
     borderRadius: 16,
@@ -580,12 +555,27 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 16,
     alignItems: "center",
-    marginTop: 18,
+    marginTop: 12,
   },
   secondaryButtonText: {
     color: "#ffffff",
     fontSize: 16,
     fontWeight: "800",
+  },
+  postList: {
+    marginTop: 16,
+    gap: 10,
+  },
+  postListRow: {
+    borderTopWidth: 1,
+    borderTopColor: "#2d3340",
+    paddingTop: 10,
+  },
+  postListTitle: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "800",
+    marginBottom: 3,
   },
   debugTitle: {
     color: "#9ca3af",
