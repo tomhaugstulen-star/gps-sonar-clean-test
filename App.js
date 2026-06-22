@@ -6,10 +6,19 @@ const RA_BASE = "https://kart.ra.no/arcgis/rest/services/Distribusjon/Kulturminn
 const RA_LAYERS = Array.from({ length: 21 }, (_, i) => i);
 const SEARCH_RADIUS = 10000;
 const FOUND_RADIUS = 40;
+const BOUNDS_DELTA = 0.006;
 
 const toRad = (v) => (v * Math.PI) / 180;
 const toDeg = (v) => (v * 180) / Math.PI;
 const round5 = (v) => Number(v).toFixed(5);
+
+function makeBounds(lat, lon, delta = BOUNDS_DELTA) {
+  return { north: lat + delta, west: lon - delta, south: lat - delta, east: lon + delta };
+}
+
+function boundsText(bounds) {
+  return `N ${round5(bounds.north)}, V ${round5(bounds.west)}, S ${round5(bounds.south)}, Ø ${round5(bounds.east)}`;
+}
 
 function distanceM(aLat, aLon, bLat, bLon) {
   const dLat = toRad(bLat - aLat);
@@ -56,23 +65,6 @@ function first(obj, keys) {
   return null;
 }
 
-function featurePoint(feature) {
-  const g = feature?.geometry;
-  if (!g) return null;
-
-  const x = n(g.x);
-  const y = n(g.y);
-  if (x !== null && y !== null) return { latitude: y, longitude: x };
-
-  const ring = Array.isArray(g.rings) && Array.isArray(g.rings[0]) ? g.rings[0] : null;
-  if (ring && ring.length) return averagePoint(ring);
-
-  const path = Array.isArray(g.paths) && Array.isArray(g.paths[0]) ? g.paths[0] : null;
-  if (path && path.length) return averagePoint(path);
-
-  return null;
-}
-
 function averagePoint(points) {
   let count = 0;
   let sx = 0;
@@ -89,69 +81,76 @@ function averagePoint(points) {
   return { latitude: sy / count, longitude: sx / count };
 }
 
+function featurePoint(feature) {
+  const g = feature?.geometry;
+  if (!g) return null;
+  const x = n(g.x);
+  const y = n(g.y);
+  if (x !== null && y !== null) return { latitude: y, longitude: x };
+  const ring = Array.isArray(g.rings) && Array.isArray(g.rings[0]) ? g.rings[0] : null;
+  if (ring && ring.length) return averagePoint(ring);
+  const path = Array.isArray(g.paths) && Array.isArray(g.paths[0]) ? g.paths[0] : null;
+  if (path && path.length) return averagePoint(path);
+  return null;
+}
+
 function raName(attributes, fallback) {
   return first(attributes, [
-    "navn", "NAVN",
-    "lokalitetsnavn", "LOKALITETSNAVN",
-    "enkeltminneart", "ENKELTMINNEART",
-    "kulturminneart", "KULTURMINNEART",
-    "art", "ART",
-    "kategori", "KATEGORI",
-    "vernetype", "VERNETYPE"
+    "navn", "NAVN", "lokalitetsnavn", "LOKALITETSNAVN", "enkeltminneart", "ENKELTMINNEART",
+    "kulturminneart", "KULTURMINNEART", "art", "ART", "kategori", "KATEGORI", "vernetype", "VERNETYPE"
   ]) || fallback;
 }
 
 async function fetchLayerInfo(layerId) {
   try {
     const data = await json(`${RA_BASE}/${layerId}?f=json`);
-    return {
-      id: layerId,
-      name: data?.name || `Lag ${layerId}`,
-      geometryType: data?.geometryType || "ukjent"
-    };
+    return { id: layerId, name: data?.name || `Lag ${layerId}`, geometryType: data?.geometryType || "ukjent" };
   } catch (error) {
     return { id: layerId, name: `Lag ${layerId}`, geometryType: "feil", error: error?.message || String(error) };
   }
 }
 
+function normalizeFeature(layerId, feature, index) {
+  const point = featurePoint(feature);
+  if (!point) return null;
+  const attributes = feature.attributes || {};
+  return {
+    id: `${layerId}-${attributes.OBJECTID || attributes.objectid || index}`,
+    layerId,
+    layerName: `Lag ${layerId}`,
+    source: "Riksantikvaren",
+    name: raName(attributes, `Kulturminne ${index + 1}`),
+    attributes,
+    ...point
+  };
+}
+
 async function fetchLayerHits(layerId, lat, lon, radius) {
   const url = `${RA_BASE}/${layerId}/query?${qs([
-    ["f", "json"],
-    ["where", "1=1"],
-    ["outFields", "*"],
-    ["returnGeometry", "true"],
-    ["geometry", `${lon},${lat}`],
-    ["geometryType", "esriGeometryPoint"],
-    ["inSR", 4326],
-    ["outSR", 4326],
-    ["spatialRel", "esriSpatialRelIntersects"],
-    ["distance", radius],
-    ["units", "esriSRUnit_Meter"],
-    ["resultRecordCount", 50]
+    ["f", "json"], ["where", "1=1"], ["outFields", "*"], ["returnGeometry", "true"],
+    ["geometry", `${lon},${lat}`], ["geometryType", "esriGeometryPoint"], ["inSR", 4326], ["outSR", 4326],
+    ["spatialRel", "esriSpatialRelIntersects"], ["distance", radius], ["units", "esriSRUnit_Meter"], ["resultRecordCount", 50]
   ])}`;
-
   const data = await json(url);
   const features = Array.isArray(data?.features) ? data.features : [];
-  return features.map((feature, index) => {
-    const point = featurePoint(feature);
-    if (!point) return null;
-    const attributes = feature.attributes || {};
-    return {
-      id: `${layerId}-${attributes.OBJECTID || attributes.objectid || index}`,
-      layerId,
-      layerName: `Lag ${layerId}`,
-      source: "Riksantikvaren",
-      name: raName(attributes, `Kulturminne ${index + 1}`),
-      attributes,
-      ...point
-    };
-  }).filter(Boolean);
+  return features.map((feature, index) => normalizeFeature(layerId, feature, index)).filter(Boolean);
+}
+
+async function fetchLayerBoundsHits(layerId, bounds) {
+  const geometry = `${bounds.west},${bounds.south},${bounds.east},${bounds.north}`;
+  const url = `${RA_BASE}/${layerId}/query?${qs([
+    ["f", "json"], ["where", "1=1"], ["outFields", "*"], ["returnGeometry", "true"],
+    ["geometry", geometry], ["geometryType", "esriGeometryEnvelope"], ["inSR", 4326], ["outSR", 4326],
+    ["spatialRel", "esriSpatialRelIntersects"], ["resultRecordCount", 100]
+  ])}`;
+  const data = await json(url);
+  const features = Array.isArray(data?.features) ? data.features : [];
+  return features.map((feature, index) => normalizeFeature(layerId, feature, index)).filter(Boolean);
 }
 
 async function scanRiksantikvaren(lat, lon, radius, onProgress) {
   const results = [];
   const layerReports = [];
-
   for (const layerId of RA_LAYERS) {
     const info = await fetchLayerInfo(layerId);
     try {
@@ -165,7 +164,25 @@ async function scanRiksantikvaren(lat, lon, radius, onProgress) {
       onProgress?.(`Lag ${layerId}: feil/ingen treff`);
     }
   }
+  return { hits: results, layerReports };
+}
 
+async function scanRiksantikvarenBounds(bounds, onProgress) {
+  const results = [];
+  const layerReports = [];
+  for (const layerId of RA_LAYERS) {
+    const info = await fetchLayerInfo(layerId);
+    try {
+      const hits = await fetchLayerBoundsHits(layerId, bounds);
+      const namedHits = hits.map((hit) => ({ ...hit, layerName: info.name || `Lag ${layerId}` }));
+      results.push(...namedHits);
+      layerReports.push({ ...info, raw: hits.length, error: null });
+      onProgress?.(`Bounds lag ${layerId}: ${info.name || "ukjent"} → ${hits.length} treff`);
+    } catch (error) {
+      layerReports.push({ ...info, raw: 0, error: error?.message || String(error) });
+      onProgress?.(`Bounds lag ${layerId}: feil/ingen treff`);
+    }
+  }
   return { hits: results, layerReports };
 }
 
@@ -200,41 +217,23 @@ function randomPoint(lat, lon, maxRadius) {
 async function readGpsStatus() {
   const servicesEnabled = await Location.hasServicesEnabledAsync();
   const permission = await Location.getForegroundPermissionsAsync();
-  return {
-    servicesEnabled,
-    status: permission.status,
-    granted: permission.granted,
-    canAskAgain: permission.canAskAgain,
-    expires: String(permission.expires)
-  };
+  return { servicesEnabled, status: permission.status, granted: permission.granted, canAskAgain: permission.canAskAgain, expires: String(permission.expires) };
 }
 
 async function ensureGpsPermission(setGpsStatus) {
   let status = await readGpsStatus();
   setGpsStatus?.(status);
-
   if (!status.servicesEnabled) {
     Alert.alert("GPS er av", "Slå på posisjonstjenester på telefonen først.");
     return false;
   }
-
   if (status.status !== "granted") {
     const requested = await Location.requestForegroundPermissionsAsync();
-    status = {
-      servicesEnabled: await Location.hasServicesEnabledAsync(),
-      status: requested.status,
-      granted: requested.granted,
-      canAskAgain: requested.canAskAgain,
-      expires: String(requested.expires)
-    };
+    status = { servicesEnabled: await Location.hasServicesEnabledAsync(), status: requested.status, granted: requested.granted, canAskAgain: requested.canAskAgain, expires: String(requested.expires) };
     setGpsStatus?.(status);
   }
-
   if (status.status === "granted") return true;
-
-  const message = status.canAskAgain === false
-    ? "Telefonen sier at appen ikke kan spørre på nytt. Åpne innstillinger og gi posisjon til GPS og Gyro Test."
-    : "Testen må ha GPS-tilgang.";
+  const message = status.canAskAgain === false ? "Telefonen sier at appen ikke kan spørre på nytt. Åpne innstillinger og gi posisjon til GPS og Gyro Test." : "Testen må ha GPS-tilgang.";
   Alert.alert("GPS ikke godkjent", message);
   return false;
 }
@@ -242,7 +241,6 @@ async function ensureGpsPermission(setGpsStatus) {
 async function getGpsFix(setGpsStatus) {
   const allowed = await ensureGpsPermission(setGpsStatus);
   if (!allowed) return null;
-
   return await new Promise((resolve) => {
     let settled = false;
     let sub = null;
@@ -253,13 +251,10 @@ async function getGpsFix(setGpsStatus) {
       resolve(value);
     };
     const timeout = setTimeout(() => finish(null), 12000);
-    Location.watchPositionAsync(
-      { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 0 },
-      (next) => {
-        clearTimeout(timeout);
-        finish(next);
-      }
-    ).then((subscription) => { sub = subscription; }).catch((error) => {
+    Location.watchPositionAsync({ accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 0 }, (next) => {
+      clearTimeout(timeout);
+      finish(next);
+    }).then((subscription) => { sub = subscription; }).catch((error) => {
       clearTimeout(timeout);
       console.log("GPS first fix feilet:", error?.message || error);
       Alert.alert("GPS feilet", "Telefonen nekter fortsatt GPS. Trykk Sjekk GPS-status og se hva status viser.");
@@ -280,46 +275,29 @@ export default function App() {
   const [layerReports, setLayerReports] = useState([]);
   const [pendingFallback, setPendingFallback] = useState(false);
 
-  useEffect(() => {
-    readGpsStatus().then(setGpsStatus).catch(() => {});
-  }, []);
+  useEffect(() => { readGpsStatus().then(setGpsStatus).catch(() => {}); }, []);
 
   useEffect(() => {
     if (screen !== "REBUS") return undefined;
     let gpsSub;
     let mounted = true;
-
     async function watch() {
       try {
         const allowed = await ensureGpsPermission(setGpsStatus);
         if (!allowed || !mounted) return;
-        gpsSub = await Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 },
-          (next) => mounted && setLocation(next)
-        );
+        gpsSub = await Location.watchPositionAsync({ accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 }, (next) => mounted && setLocation(next));
       } catch (error) {
         console.log("GPS-sporing feilet:", error?.message || error);
         if (mounted) setStatus("GPS-sporing feilet. Sjekk GPS-status.");
       }
     }
-
     watch();
-    return () => {
-      mounted = false;
-      if (gpsSub) gpsSub.remove();
-    };
+    return () => { mounted = false; if (gpsSub) gpsSub.remove(); };
   }, [screen]);
 
   const activePost = posts[activeIndex] || null;
-  const activeDistance = useMemo(() => {
-    if (!location || !activePost) return null;
-    return distanceM(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude);
-  }, [location, activePost]);
-
-  const activeBearing = useMemo(() => {
-    if (!location || !activePost) return null;
-    return bearing(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude);
-  }, [location, activePost]);
+  const activeDistance = useMemo(() => !location || !activePost ? null : distanceM(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude), [location, activePost]);
+  const activeBearing = useMemo(() => !location || !activePost ? null : bearing(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude), [location, activePost]);
 
   useEffect(() => {
     if (screen !== "REBUS" || !location || !activePost || activePost.found) return;
@@ -329,26 +307,17 @@ export default function App() {
       setPosts(updated);
       const nextIndex = updated.findIndex((post) => !post.found);
       if (nextIndex === -1) setStatus("Post funnet. Alle postene er funnet.");
-      else {
-        setActiveIndex(nextIndex);
-        setStatus(`Post ${activePost.number} funnet. Gå til post ${updated[nextIndex].number}: ${updated[nextIndex].name}`);
-      }
+      else { setActiveIndex(nextIndex); setStatus(`Post ${activePost.number} funnet. Gå til post ${updated[nextIndex].number}: ${updated[nextIndex].name}`); }
       return;
     }
     setStatus(`Gå mot ${directionText(bearing(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude))}. Avstand: ${Math.round(d)} meter.`);
   }, [location, screen, activeIndex, activePost, posts]);
 
   async function refreshGps() {
-    try {
-      setGpsStatus(await readGpsStatus());
-    } catch (error) {
-      setStatus(`Klarte ikke lese GPS-status: ${error?.message || error}`);
-    }
+    try { setGpsStatus(await readGpsStatus()); } catch (error) { setStatus(`Klarte ikke lese GPS-status: ${error?.message || error}`); }
   }
 
-  function openSettings() {
-    Linking.openSettings().catch(() => Alert.alert("Innstillinger", "Klarte ikke åpne app-innstillinger."));
-  }
+  function openSettings() { Linking.openSettings().catch(() => Alert.alert("Innstillinger", "Klarte ikke åpne app-innstillinger.")); }
 
   function startWithRoute(route) {
     setPendingFallback(false);
@@ -359,80 +328,60 @@ export default function App() {
   }
 
   function startGpsFallbackPost() {
-    if (!location) {
-      Alert.alert("Ingen GPS", "Start Riksantikvaren-test først, så appen har et startpunkt.");
-      return;
-    }
+    if (!location) { Alert.alert("Ingen GPS", "Start Riksantikvaren-test først, så appen har et startpunkt."); return; }
     const point = randomPoint(location.coords.latitude, location.coords.longitude, 35);
-    const fallback = [{
-      id: "gps-fallback-1",
-      number: 1,
-      found: false,
-      source: "GPS-test",
-      layerName: "Lokal testpost",
-      layerId: "test",
-      name: "Testpost nær deg",
-      ...point,
-      distanceFromStart: distanceM(location.coords.latitude, location.coords.longitude, point.latitude, point.longitude)
-    }];
+    const fallback = [{ id: "gps-fallback-1", number: 1, found: false, source: "GPS-test", layerName: "Lokal testpost", layerId: "test", name: "Testpost nær deg", ...point, distanceFromStart: distanceM(location.coords.latitude, location.coords.longitude, point.latitude, point.longitude) }];
     startWithRoute(fallback);
   }
 
   async function startRaTest() {
-    setLoading(true);
-    setScreen("RA_TEST");
-    setPosts([]);
-    setLayerReports([]);
-    setPendingFallback(false);
-    setStatus("Henter GPS...");
-    setApiStatus("Starter Riksantikvaren layer-scan.");
-
+    setLoading(true); setScreen("RA_TEST"); setPosts([]); setLayerReports([]); setPendingFallback(false); setStatus("Henter GPS..."); setApiStatus("Starter Riksantikvaren layer-scan.");
     try {
       const current = await getGpsFix(setGpsStatus);
-      if (!current) {
-        setStatus("Ingen GPS-fix. Trykk Sjekk GPS-status og kontroller tillatelsen.");
-        return;
-      }
-
+      if (!current) { setStatus("Ingen GPS-fix. Trykk Sjekk GPS-status og kontroller tillatelsen."); return; }
       setLocation(current);
       const lat = current.coords.latitude;
       const lon = current.coords.longitude;
       const accuracy = current.coords.accuracy ? `${Math.round(current.coords.accuracy)} m` : "ukjent";
       setApiStatus(`GPS ${round5(lat)}, ${round5(lon)}. Nøyaktighet: ${accuracy}. Søker ${SEARCH_RADIUS} m.`);
-
       const result = await scanRiksantikvaren(lat, lon, SEARCH_RADIUS, setStatus);
       setLayerReports(result.layerReports);
       const route = routeFrom(lat, lon, result.hits, SEARCH_RADIUS, 2);
       const useful = routeFrom(lat, lon, result.hits, SEARCH_RADIUS, 99);
       const layersWithHits = result.layerReports.filter((layer) => layer.raw > 0);
       setApiStatus(`RA lag sjekket: ${result.layerReports.length}. Lag med treff: ${layersWithHits.length}. Rå treff: ${result.hits.length}. Brukbare: ${useful.length}.`);
-
-      if (route.length > 0) {
-        startWithRoute(route);
-        return;
-      }
-
-      setPendingFallback(true);
-      setStatus("Ingen Riksantikvaren-treff fra lag 0–20 her. Se lagrapport under.");
+      if (route.length > 0) { startWithRoute(route); return; }
+      setPendingFallback(true); setStatus("Ingen Riksantikvaren-treff fra lag 0–20 her. Se lagrapport under.");
     } catch (error) {
-      console.log("RA-test feilet:", error?.message || error);
-      setStatus(`Riksantikvaren-test feilet: ${error?.message || error}`);
-      Alert.alert("Riksantikvaren feilet", "Se statusfeltet for detaljer.");
-    } finally {
-      setLoading(false);
-    }
+      console.log("RA-test feilet:", error?.message || error); setStatus(`Riksantikvaren-test feilet: ${error?.message || error}`); Alert.alert("Riksantikvaren feilet", "Se statusfeltet for detaljer.");
+    } finally { setLoading(false); }
   }
 
-  function reset() {
-    setScreen("MENU");
-    setLoading(false);
-    setStatus("Klar.");
-    setApiStatus("");
-    setPosts([]);
-    setActiveIndex(0);
-    setLayerReports([]);
-    setPendingFallback(false);
+  async function startGpsBoundsTest() {
+    setLoading(true); setScreen("RA_TEST"); setPosts([]); setLayerReports([]); setPendingFallback(false); setStatus("Henter GPS og lager Kulturminnesøk-bounds..."); setApiStatus("Starter bounds-test rundt GPS.");
+    try {
+      const current = await getGpsFix(setGpsStatus);
+      if (!current) { setStatus("Ingen GPS-fix. Trykk Sjekk GPS-status og kontroller tillatelsen."); return; }
+      setLocation(current);
+      const lat = current.coords.latitude;
+      const lon = current.coords.longitude;
+      const bounds = makeBounds(lat, lon);
+      const accuracy = current.coords.accuracy ? `${Math.round(current.coords.accuracy)} m` : "ukjent";
+      setApiStatus(`GPS ${round5(lat)}, ${round5(lon)}. Nøyaktighet: ${accuracy}. Bounds: ${boundsText(bounds)}.`);
+      const result = await scanRiksantikvarenBounds(bounds, setStatus);
+      setLayerReports(result.layerReports);
+      const route = routeFrom(lat, lon, result.hits, SEARCH_RADIUS, 2);
+      const useful = routeFrom(lat, lon, result.hits, SEARCH_RADIUS, 99);
+      const layersWithHits = result.layerReports.filter((layer) => layer.raw > 0);
+      setApiStatus(`Bounds-test. Lag sjekket: ${result.layerReports.length}. Lag med treff: ${layersWithHits.length}. Rå treff: ${result.hits.length}. Brukbare: ${useful.length}.`);
+      if (route.length > 0) { startWithRoute(route); return; }
+      setPendingFallback(true); setStatus("Ingen treff i GPS-bounds-testen. Se lagrapport under.");
+    } catch (error) {
+      console.log("Bounds-test feilet:", error?.message || error); setStatus(`Bounds-test feilet: ${error?.message || error}`); Alert.alert("Bounds-test feilet", "Se statusfeltet for detaljer.");
+    } finally { setLoading(false); }
   }
+
+  function reset() { setScreen("MENU"); setLoading(false); setStatus("Klar."); setApiStatus(""); setPosts([]); setActiveIndex(0); setLayerReports([]); setPendingFallback(false); }
 
   const foundCount = posts.filter((post) => post.found).length;
 
@@ -440,12 +389,16 @@ export default function App() {
     return (
       <View style={styles.menu}>
         <Text style={styles.title}>Riksantikvaren GPS-test</Text>
-        <Text style={styles.menuText}>Tester kun Riksantikvaren kartlag. Kartverket, Sonar og gyro er fjernet fra testflyten.</Text>
+        <Text style={styles.menuText}>Tester Riksantikvaren kartlag. Kartverket, Sonar og gyro er fjernet fra testflyten.</Text>
         {loading ? <ActivityIndicator size="large" color="#FFFFFF" /> : null}
         <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} />
         <TouchableOpacity style={styles.mainButton} onPress={startRaTest} disabled={loading}>
-          <Text style={styles.buttonTitle}>START RIKSANTIKVAREN-TEST</Text>
+          <Text style={styles.buttonTitle}>START GPS RIKSANTIKVAREN-TEST</Text>
           <Text style={styles.buttonText}>GPS • RA MapServer lag 0–20 • 10 km radius</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.mainButton, styles.localButton]} onPress={startGpsBoundsTest} disabled={loading}>
+          <Text style={styles.buttonTitle}>TEST KULTURMINNESØK-BOUNDS</Text>
+          <Text style={styles.buttonText}>Lager kartutsnitt rundt GPS • uten private coords i repo</Text>
         </TouchableOpacity>
       </View>
     );
@@ -460,7 +413,6 @@ export default function App() {
         <Text style={styles.status}>{status}</Text>
         <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} compact />
         <Text style={styles.meta}>{apiStatus}</Text>
-
         {screen === "REBUS" ? (
           <>
             <Text style={styles.meta}>Poster funnet: {foundCount} / {posts.length}</Text>
@@ -470,7 +422,7 @@ export default function App() {
                 <Text style={styles.postName}>{activePost.name}</Text>
                 <Text style={styles.postMeta}>Avstand: {activeDistance === null ? "venter på GPS" : `${Math.round(activeDistance)} m`}</Text>
                 <Text style={styles.postMeta}>Retning: {activeBearing === null ? "venter på GPS" : directionText(activeBearing)}</Text>
-                <Text style={styles.postMeta}>GPS-nøyaktighet: {location?.coords?.accuracy ? `${Math.round(location.coords.accuracy)} m` : "ukjent"}</Text>
+                <Text style={styles.postMeta}>GPS-nøyaktighet: {location?.coords?.accuracy !== undefined ? `${Math.round(location.coords.accuracy)} m` : "ukjent"}</Text>
               </View>
             ) : null}
           </>
@@ -479,19 +431,15 @@ export default function App() {
             {pendingFallback ? (
               <View style={styles.choiceCard}>
                 <Text style={styles.choiceTitle}>Ingen RA-treff</Text>
-                <Text style={styles.choiceText}>GPS fungerer, men disse RA-lagene ga ikke treff. Du kan lage en lokal testpost for å teste GPS-godkjenning.</Text>
-                <TouchableOpacity style={styles.choiceButton} onPress={startGpsFallbackPost} disabled={loading}>
-                  <Text style={styles.choiceButtonText}>Lag GPS-testpost her</Text>
-                </TouchableOpacity>
+                <Text style={styles.choiceText}>GPS fungerer, men RA-lagene ga ikke treff. Du kan lage en lokal testpost for å teste GPS-godkjenning.</Text>
+                <TouchableOpacity style={styles.choiceButton} onPress={startGpsFallbackPost} disabled={loading}><Text style={styles.choiceButtonText}>Lag GPS-testpost her</Text></TouchableOpacity>
               </View>
             ) : null}
             <LayerReport reports={layerReports} />
           </>
         )}
       </View>
-      <TouchableOpacity style={styles.backButton} onPress={reset}>
-        <Text style={styles.backText}>Tilbake</Text>
-      </TouchableOpacity>
+      <TouchableOpacity style={styles.backButton} onPress={reset}><Text style={styles.backText}>Tilbake</Text></TouchableOpacity>
     </ScrollView>
   );
 }
@@ -535,6 +483,7 @@ const styles = StyleSheet.create({
   kicker: { color: "#F59E0B", fontSize: 13, fontWeight: "900", letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 16 },
   menuText: { color: "#94A3B8", fontSize: 16, lineHeight: 23, textAlign: "center", marginBottom: 18 },
   mainButton: { width: "100%", backgroundColor: "#3B82F6", borderRadius: 18, padding: 24, alignItems: "center", marginTop: 18 },
+  localButton: { backgroundColor: "#10B981" },
   buttonTitle: { color: "#FFFFFF", fontSize: 20, fontWeight: "900", textAlign: "center" },
   buttonText: { color: "rgba(255,255,255,0.82)", marginTop: 6, textAlign: "center" },
   card: { width: "100%", backgroundColor: "#1E293B", borderRadius: 20, padding: 20, alignItems: "center", borderWidth: 1, borderColor: "rgba(148, 163, 184, 0.14)" },
