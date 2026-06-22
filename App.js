@@ -4,11 +4,11 @@ import * as Location from "expo-location";
 
 const OGC_BASE = "https://api.ra.no/LokaliteterEnkeltminnerOgSikringssoner";
 const OGC_COLLECTIONS = [
-  { id: "lokaliteter", label: "Lokaliteter" },
-  { id: "enkeltminner", label: "Enkeltminner" },
-  { id: "sikringssoner", label: "Sikringssoner" }
+  { id: "lokaliteter", label: "Lokaliteter", priority: 1 },
+  { id: "enkeltminner", label: "Enkeltminner", priority: 2 },
+  { id: "sikringssoner", label: "Sikringssoner", priority: 9 }
 ];
-const BOUNDS_DELTA = 0.006;
+const BOUNDS_DELTA = 0.018;
 const FOUND_RADIUS = 40;
 const ROUTE_COUNT = 2;
 
@@ -121,6 +121,7 @@ function normalizeFeature(collection, feature, index) {
     id: `${collection.id}-${feature.id || properties.id || properties.OBJECTID || index}`,
     collectionId: collection.id,
     collectionLabel: collection.label,
+    priority: collection.priority,
     source: "Riksantikvaren OGC",
     name: featureName(properties, `${collection.label} ${index + 1}`),
     properties,
@@ -159,7 +160,7 @@ async function scanOgcBounds(bounds, onProgress) {
 
 function routeFrom(lat, lon, rawPosts, count) {
   const seen = new Set();
-  return rawPosts
+  const sorted = rawPosts
     .map((post) => ({ ...post, distanceFromStart: distanceM(lat, lon, post.latitude, post.longitude) }))
     .filter((post) => Number.isFinite(post.distanceFromStart))
     .filter((post) => {
@@ -168,7 +169,9 @@ function routeFrom(lat, lon, rawPosts, count) {
       seen.add(key);
       return true;
     })
-    .sort((a, b) => a.distanceFromStart - b.distanceFromStart)
+    .sort((a, b) => (a.priority - b.priority) || (a.distanceFromStart - b.distanceFromStart));
+  const preferred = sorted.filter((post) => post.collectionId !== "sikringssoner");
+  return (preferred.length ? preferred : sorted)
     .slice(0, count)
     .map((post, index) => ({ ...post, number: index + 1, found: false }));
 }
@@ -289,7 +292,7 @@ export default function App() {
     setScreen("OGC_TEST");
     setPosts([]);
     setReports([]);
-    setStatus("Henter GPS og lager OGC-bounds...");
+    setStatus("Henter GPS og lager større OGC-bounds...");
     setApiStatus("Starter Riksantikvaren OGC GeoJSON-test.");
     try {
       const current = await getGpsFix(setGpsStatus);
@@ -305,7 +308,8 @@ export default function App() {
       const route = routeFrom(lat, lon, result.hits, ROUTE_COUNT);
       const useful = routeFrom(lat, lon, result.hits, 99);
       const collectionsWithHits = result.reports.filter((r) => r.raw > 0);
-      setApiStatus(`OGC samlinger: ${result.reports.length}. Samlinger med treff: ${collectionsWithHits.length}. Rå treff: ${result.hits.length}. Brukbare: ${useful.length}.`);
+      const fallbackUsed = useful.length > 0 && useful.every((post) => post.collectionId === "sikringssoner");
+      setApiStatus(`OGC samlinger: ${result.reports.length}. Samlinger med treff: ${collectionsWithHits.length}. Rå treff: ${result.hits.length}. Brukbare: ${useful.length}. ${fallbackUsed ? "Fallback: sikringssoner." : "Prioriterer lokaliteter/enkeltminner."}`);
       if (route.length > 0) { startWithRoute(route); return; }
       setStatus("Ingen OGC-treff i GPS-bounds. Se rapport under.");
     } catch (error) {
@@ -323,12 +327,12 @@ export default function App() {
     return (
       <View style={styles.menu}>
         <Text style={styles.title}>Riksantikvaren OGC-test</Text>
-        <Text style={styles.menuText}>Tester ny OGC API / GeoJSON. Sonar, gyro, Kartverket og ArcGIS layer-scan er ute.</Text>
+        <Text style={styles.menuText}>Tester ny OGC API / GeoJSON. Større søkeområde. Sikringssoner brukes bare som fallback.</Text>
         {loading ? <ActivityIndicator size="large" color="#FFFFFF" /> : null}
         <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} />
         <TouchableOpacity style={styles.mainButton} onPress={startOgcTest} disabled={loading}>
           <Text style={styles.buttonTitle}>START OGC GEOJSON-TEST</Text>
-          <Text style={styles.buttonText}>GPS → bbox → lokaliteter/enkeltminner/sikringssoner</Text>
+          <Text style={styles.buttonText}>GPS → større bbox → prioriter lokaliteter/enkeltminner</Text>
         </TouchableOpacity>
       </View>
     );
