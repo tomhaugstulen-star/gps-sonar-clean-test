@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Animated, Easing, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, Alert, Animated, Easing, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import * as Location from "expo-location";
 import { Magnetometer } from "expo-sensors";
 
-const START_RADIUS = 500;
-const MAX_RADIUS = 2000;
-const FOUND_RADIUS = 25;
+const REBUS_RADIUS = 500;
+const REBUS_MAX_RADIUS = 2000;
+const REBUS_FOUND_RADIUS = 25;
 const SONAR_RADIUS = 20;
 const SONAR_FOUND_RADIUS = 5;
 const SONAR_COUNT = 3;
@@ -21,7 +21,7 @@ const toDeg = (v) => (v * 180) / Math.PI;
 function distanceM(aLat, aLon, bLat, bLon) {
   const dLat = toRad(bLat - aLat);
   const dLon = toRad(bLon - aLon);
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
   return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
@@ -164,32 +164,90 @@ function signalPercent(distance) {
   return `${Math.max(12, Math.min(96, Math.round(percent)))}%`;
 }
 
-async function ensureGpsPermission() {
-  let permission = await Location.getForegroundPermissionsAsync();
-  if (permission.status !== "granted") permission = await Location.requestForegroundPermissionsAsync();
-  if (permission.status === "granted") return true;
-  const message = permission.canAskAgain === false ? "GPS er avslått for appen. Åpne telefonens innstillinger og tillat posisjon for appen." : "Testen må ha GPS-tilgang.";
-  Alert.alert("GPS kreves", message);
+async function readGpsStatus() {
+  const servicesEnabled = await Location.hasServicesEnabledAsync();
+  const permission = await Location.getForegroundPermissionsAsync();
+  return {
+    servicesEnabled,
+    status: permission.status,
+    granted: permission.granted,
+    canAskAgain: permission.canAskAgain,
+    expires: String(permission.expires)
+  };
+}
+
+async function ensureGpsPermission(setGpsStatus) {
+  let status = await readGpsStatus();
+  setGpsStatus?.(status);
+
+  if (!status.servicesEnabled) {
+    Alert.alert("GPS er av", "Slå på posisjonstjenester på telefonen først.");
+    return false;
+  }
+
+  if (status.status !== "granted") {
+    const requested = await Location.requestForegroundPermissionsAsync();
+    status = {
+      servicesEnabled: await Location.hasServicesEnabledAsync(),
+      status: requested.status,
+      granted: requested.granted,
+      canAskAgain: requested.canAskAgain,
+      expires: String(requested.expires)
+    };
+    setGpsStatus?.(status);
+  }
+
+  if (status.status === "granted") return true;
+
+  const message = status.canAskAgain === false
+    ? "Telefonen sier at appen ikke kan spørre på nytt. Åpne innstillinger og gi posisjon til Expo Go."
+    : "Testen må ha GPS-tilgang.";
+  Alert.alert("GPS ikke godkjent", message);
   return false;
 }
 
-async function getGpsPosition() {
-  const allowed = await ensureGpsPermission();
+async function getGpsFix(setGpsStatus) {
+  const allowed = await ensureGpsPermission(setGpsStatus);
   if (!allowed) return null;
-  try {
-    return await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-  } catch (error) {
-    console.log("GPS-posisjon feilet:", error?.message || error);
-    Alert.alert("GPS feilet", "Klarte ikke hente GPS-posisjon. Sjekk at posisjon er slått på, og prøv ute med fri sikt.");
-    return null;
-  }
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let sub = null;
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (sub) sub.remove();
+      resolve(value);
+    };
+
+    const timeout = setTimeout(() => {
+      finish(null);
+    }, 12000);
+
+    Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 0 },
+      (next) => {
+        clearTimeout(timeout);
+        finish(next);
+      }
+    )
+      .then((subscription) => {
+        sub = subscription;
+      })
+      .catch((error) => {
+        clearTimeout(timeout);
+        console.log("GPS first fix feilet:", error?.message || error);
+        Alert.alert("GPS feilet", "Telefonen nekter fortsatt GPS. Trykk Sjekk GPS-status og se hva status viser.");
+        finish(null);
+      });
+  });
 }
 
 function SonarPulse({ distance, isClose }) {
   const pulse = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-    const signal = sonarSignal(distance);
     let interval = 1600;
     if (distance <= 5) interval = 420;
     else if (distance <= 8) interval = 620;
@@ -197,12 +255,7 @@ function SonarPulse({ distance, isClose }) {
 
     const runPulse = () => {
       pulse.setValue(1);
-      Animated.timing(pulse, {
-        toValue: 3.8,
-        duration: Math.min(interval, 700),
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true
-      }).start();
+      Animated.timing(pulse, { toValue: 3.8, duration: Math.min(interval, 700), easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
     };
 
     runPulse();
@@ -212,15 +265,7 @@ function SonarPulse({ distance, isClose }) {
 
   return (
     <View style={styles.sonarWrap}>
-      <Animated.View
-        style={[
-          styles.sonarWave,
-          {
-            transform: [{ scale: pulse }],
-            opacity: pulse.interpolate({ inputRange: [1, 3.8], outputRange: [0.68, 0] })
-          }
-        ]}
-      />
+      <Animated.View style={[styles.sonarWave, { transform: [{ scale: pulse }], opacity: pulse.interpolate({ inputRange: [1, 3.8], outputRange: [0.68, 0] }) }]} />
       <View style={styles.sonarRingOuter} />
       <View style={styles.sonarRingMid} />
       <View style={styles.sonarRingInner} />
@@ -234,10 +279,11 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("Klar.");
   const [apiStatus, setApiStatus] = useState("");
+  const [gpsStatus, setGpsStatus] = useState(null);
   const [location, setLocation] = useState(null);
   const [posts, setPosts] = useState([]);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [radius, setRadius] = useState(START_RADIUS);
+  const [radius, setRadius] = useState(REBUS_RADIUS);
   const [pending, setPending] = useState(null);
   const [startPoint, setStartPoint] = useState(null);
   const [heading, setHeading] = useState(0);
@@ -245,16 +291,27 @@ export default function App() {
   const [sonarSearching, setSonarSearching] = useState(false);
 
   useEffect(() => {
+    readGpsStatus().then(setGpsStatus).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     const shouldTrack = screen === "REBUS" || (screen === "SONAR" && sonarSearching);
     if (!shouldTrack) return undefined;
+
     let gpsSub;
     let compassSub;
     let mounted = true;
+
     async function watch() {
       try {
-        const allowed = await ensureGpsPermission();
+        const allowed = await ensureGpsPermission(setGpsStatus);
         if (!allowed || !mounted) return;
-        gpsSub = await Location.watchPositionAsync({ accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 }, (next) => mounted && setLocation(next));
+
+        gpsSub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 },
+          (next) => mounted && setLocation(next)
+        );
+
         if (screen === "SONAR") {
           Magnetometer.setUpdateInterval(150);
           compassSub = Magnetometer.addListener((data) => {
@@ -264,9 +321,10 @@ export default function App() {
         }
       } catch (error) {
         console.log("Sporing feilet:", error?.message || error);
-        if (mounted) setStatus("GPS/kompass-sporing feilet. Sjekk tillatelser og prøv igjen.");
+        if (mounted) setStatus("GPS/kompass-sporing feilet. Sjekk GPS-status.");
       }
     }
+
     watch();
     return () => {
       mounted = false;
@@ -280,6 +338,7 @@ export default function App() {
     if (!location || !activePost) return null;
     return distanceM(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude);
   }, [location, activePost]);
+
   const activeBearing = useMemo(() => {
     if (!location || !activePost) return null;
     return bearing(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude);
@@ -299,6 +358,18 @@ export default function App() {
   const sonar = sonarSignal(closestTreasure?.distance);
   const canOpenTreasure = Boolean(closestTreasure && closestTreasure.distance <= SONAR_FOUND_RADIUS);
 
+  async function refreshGps() {
+    try {
+      setGpsStatus(await readGpsStatus());
+    } catch (error) {
+      setStatus(`Klarte ikke lese GPS-status: ${error?.message || error}`);
+    }
+  }
+
+  function openSettings() {
+    Linking.openSettings().catch(() => Alert.alert("Innstillinger", "Klarte ikke åpne app-innstillinger."));
+  }
+
   function startWithRoute(route, usedRadius) {
     setPending(null);
     setRadius(usedRadius);
@@ -308,7 +379,7 @@ export default function App() {
     setStatus(route.length === 1 ? `1-post test klar. Gå til post 1: ${route[0].name}` : `Sløyfe klar. Gå til post 1: ${route[0].name}`);
   }
 
-  async function search(radiusToUse = START_RADIUS, existingStartPoint = null) {
+  async function search(radiusToUse = REBUS_RADIUS, existingStartPoint = null) {
     setLoading(true);
     setPending(null);
     setPosts([]);
@@ -318,11 +389,12 @@ export default function App() {
     setStatus("Søker etter ekte poster...");
     setApiStatus(`Søkeradius: ${radiusToUse} m`);
     try {
-      const current = existingStartPoint || await getGpsPosition();
+      const current = existingStartPoint || await getGpsFix(setGpsStatus);
       if (!current) {
-        setStatus("GPS-tilgang mangler. Gi posisjonstillatelse og prøv igjen.");
+        setStatus("Ingen GPS-fix. Trykk Sjekk GPS-status og kontroller tillatelsen.");
         return;
       }
+
       setLocation(current);
       setStartPoint(current);
       const lat = current.coords.latitude;
@@ -338,14 +410,14 @@ export default function App() {
       setApiStatus(`Radius: ${radiusToUse} m. Kartverket: ${kv.length}. Riksantikvaren: ${ra.length}.`);
       if (two.length === 2) startWithRoute(two, radiusToUse);
       else {
-        setPending({ one, canUseOne: one.length === 1, canSearchLarger: radiusToUse < MAX_RADIUS, radius: radiusToUse });
+        setPending({ one, canUseOne: one.length === 1, canSearchLarger: radiusToUse < REBUS_MAX_RADIUS, radius: radiusToUse });
         if (one.length === 1) setStatus(`Fant bare 1 post innen ${radiusToUse} m. Velg større radius eller bruk 1 post.`);
-        else if (radiusToUse < MAX_RADIUS) setStatus(`Fant ingen poster innen ${radiusToUse} m. Velg større radius.`);
+        else if (radiusToUse < REBUS_MAX_RADIUS) setStatus(`Fant ingen poster innen ${radiusToUse} m. Velg større radius.`);
         else setStatus(`Fant ingen poster innen ${radiusToUse} m. Flytt deg og prøv igjen.`);
       }
     } catch (e) {
       console.log("Rebus feilet:", e?.message || e);
-      Alert.alert("Rebus feilet", "Sjekk GPS og nettverk.");
+      Alert.alert("Rebus feilet", "Sjekk GPS-status og nettverk.");
       setStatus("Klarte ikke starte API-test.");
     } finally {
       setLoading(false);
@@ -368,11 +440,12 @@ export default function App() {
     setStatus("Henter GPS og lager sonarområde...");
     setTreasures([]);
     try {
-      const current = await getGpsPosition();
+      const current = await getGpsFix(setGpsStatus);
       if (!current) {
-        setStatus("GPS-tilgang mangler. Gi posisjonstillatelse og prøv igjen.");
+        setStatus("Ingen GPS-fix. Trykk Sjekk GPS-status og kontroller tillatelsen.");
         return;
       }
+
       const lat = current.coords.latitude;
       const lon = current.coords.longitude;
       const nextTreasures = Array.from({ length: SONAR_COUNT }).map((_, index) => ({ id: `treasure-${index + 1}`, name: `Skatt ${index + 1}`, found: false, ...randomPoint(lat, lon, SONAR_RADIUS) }));
@@ -382,7 +455,7 @@ export default function App() {
       setStatus("Sonar søker. Legg mobilen i lomma eller hold den rolig og følg signalet.");
     } catch (e) {
       console.log("Sonar feilet:", e?.message || e);
-      Alert.alert("Sonar feilet", "Sjekk GPS og prøv igjen ute.");
+      Alert.alert("Sonar feilet", "Sjekk GPS-status og prøv igjen ute.");
       setStatus("Klarte ikke starte Sonar-test.");
     } finally {
       setLoading(false);
@@ -413,7 +486,7 @@ export default function App() {
   useEffect(() => {
     if (screen !== "REBUS" || !location || !activePost || activePost.found) return;
     const d = distanceM(location.coords.latitude, location.coords.longitude, activePost.latitude, activePost.longitude);
-    if (d <= FOUND_RADIUS) {
+    if (d <= REBUS_FOUND_RADIUS) {
       const updated = posts.map((post, index) => index === activeIndex ? { ...post, found: true } : post);
       setPosts(updated);
       const nextIndex = updated.findIndex((post) => !post.found);
@@ -442,18 +515,23 @@ export default function App() {
     setTreasures([]);
     setSonarSearching(false);
     setActiveIndex(0);
-    setRadius(START_RADIUS);
+    setRadius(REBUS_RADIUS);
     setPending(null);
     setStartPoint(null);
   }
+
+  const foundCount = posts.filter((post) => post.found).length;
+  const sonarFound = treasures.filter((t) => t.found).length;
+  const nextRadius = pending ? Math.min(pending.radius * 2, REBUS_MAX_RADIUS) : null;
 
   if (screen === "MENU") {
     return (
       <View style={styles.menu}>
         <Text style={styles.title}>GPS Test</Text>
-        <Text style={styles.menuText}>Velg Rebus med ekte API-poster eller Sonar-siden fra skattejaktflyten.</Text>
+        <Text style={styles.menuText}>Test først GPS-status. Deretter start Rebus eller Sonar.</Text>
         {loading ? <ActivityIndicator size="large" color="#FFFFFF" /> : null}
-        <TouchableOpacity style={styles.mainButton} onPress={() => search(START_RADIUS)} disabled={loading}>
+        <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} />
+        <TouchableOpacity style={styles.mainButton} onPress={() => search(REBUS_RADIUS)} disabled={loading}>
           <Text style={styles.buttonTitle}>START REBUS API-TEST</Text>
           <Text style={styles.buttonText}>GPS • Kartverket • Riksantikvaren</Text>
         </TouchableOpacity>
@@ -465,10 +543,6 @@ export default function App() {
     );
   }
 
-  const foundCount = posts.filter((post) => post.found).length;
-  const sonarFound = treasures.filter((t) => t.found).length;
-  const nextRadius = pending ? Math.min(pending.radius * 2, MAX_RADIUS) : null;
-
   return (
     <ScrollView contentContainerStyle={[styles.game, screen === "SONAR" && styles.sonarGame]}>
       <Text style={styles.title}>{screen === "SONAR" ? "Finn skatten" : "Rebus API-test"}</Text>
@@ -476,6 +550,7 @@ export default function App() {
       <View style={styles.card}>
         {loading ? <ActivityIndicator size="large" color="#F59E0B" /> : null}
         <Text style={styles.status}>{status}</Text>
+        <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} compact />
 
         {screen === "REBUS" ? (
           <>
@@ -536,13 +611,29 @@ export default function App() {
   );
 }
 
+function GpsStatusBox({ gpsStatus, onRefresh, onSettings, compact }) {
+  return (
+    <View style={styles.gpsBox}>
+      <Text style={styles.gpsTitle}>GPS-status</Text>
+      <Text style={styles.gpsText}>Stedstjenester: {gpsStatus ? String(gpsStatus.servicesEnabled) : "ukjent"}</Text>
+      <Text style={styles.gpsText}>Permission: {gpsStatus?.status || "ukjent"}</Text>
+      <Text style={styles.gpsText}>Granted: {gpsStatus ? String(gpsStatus.granted) : "ukjent"}</Text>
+      {!compact ? <Text style={styles.gpsText}>Can ask again: {gpsStatus ? String(gpsStatus.canAskAgain) : "ukjent"}</Text> : null}
+      <View style={styles.gpsButtons}>
+        <TouchableOpacity style={styles.smallButton} onPress={onRefresh}><Text style={styles.smallButtonText}>Sjekk GPS-status</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.smallButton} onPress={onSettings}><Text style={styles.smallButtonText}>Åpne innstillinger</Text></TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   menu: { flex: 1, backgroundColor: "#0F172A", justifyContent: "center", alignItems: "center", padding: 24 },
   game: { flexGrow: 1, backgroundColor: "#1E3A8A", padding: 20, justifyContent: "center", alignItems: "center" },
   sonarGame: { backgroundColor: "#0F172A" },
   title: { color: "#FFFFFF", fontSize: 32, fontWeight: "900", textAlign: "center", marginBottom: 8 },
   kicker: { color: "#F59E0B", fontSize: 13, fontWeight: "900", letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 16 },
-  menuText: { color: "#94A3B8", fontSize: 16, lineHeight: 23, textAlign: "center", marginBottom: 28 },
+  menuText: { color: "#94A3B8", fontSize: 16, lineHeight: 23, textAlign: "center", marginBottom: 18 },
   mainButton: { width: "100%", backgroundColor: "#3B82F6", borderRadius: 18, padding: 24, alignItems: "center", marginTop: 18 },
   sonarButton: { backgroundColor: "#10B981" },
   buttonTitle: { color: "#FFFFFF", fontSize: 21, fontWeight: "900" },
@@ -550,6 +641,12 @@ const styles = StyleSheet.create({
   card: { width: "100%", backgroundColor: "#1E293B", borderRadius: 20, padding: 20, alignItems: "center", borderWidth: 1, borderColor: "rgba(148, 163, 184, 0.14)" },
   status: { color: "#E2E8F0", fontSize: 20, fontWeight: "800", lineHeight: 28, textAlign: "center", marginTop: 8, marginBottom: 10 },
   meta: { color: "#94A3B8", fontSize: 14, marginTop: 8, textAlign: "center" },
+  gpsBox: { width: "100%", backgroundColor: "#111827", borderRadius: 16, padding: 14, marginTop: 10, borderWidth: 1, borderColor: "#334155" },
+  gpsTitle: { color: "#F59E0B", fontSize: 15, fontWeight: "900", marginBottom: 6, textAlign: "center" },
+  gpsText: { color: "#E2E8F0", fontSize: 13, lineHeight: 19, textAlign: "center" },
+  gpsButtons: { flexDirection: "row", gap: 8, marginTop: 10 },
+  smallButton: { flex: 1, minHeight: 42, backgroundColor: "#334155", borderRadius: 12, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
+  smallButtonText: { color: "#E2E8F0", fontSize: 12, fontWeight: "900", textAlign: "center" },
   choiceCard: { width: "100%", backgroundColor: "#EEF2FF", borderRadius: 16, padding: 16, marginTop: 18 },
   choiceTitle: { color: "#1E3A8A", fontSize: 18, fontWeight: "900", textAlign: "center" },
   choiceText: { color: "#334155", fontSize: 15, lineHeight: 21, textAlign: "center", marginTop: 6, marginBottom: 8 },
