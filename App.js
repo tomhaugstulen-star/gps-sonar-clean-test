@@ -10,7 +10,8 @@ const OGC_COLLECTIONS = [
 ];
 const BOUNDS_DELTA = 0.018;
 const FOUND_RADIUS = 40;
-const ROUTE_COUNT = 2;
+const ROUTE_RADIUS = 2000;
+const ROUTE_COUNT = 4;
 
 const toRad = (v) => (v * Math.PI) / 180;
 const toDeg = (v) => (v * 180) / Math.PI;
@@ -163,6 +164,7 @@ function routeFrom(lat, lon, rawPosts, count) {
   const sorted = rawPosts
     .map((post) => ({ ...post, distanceFromStart: distanceM(lat, lon, post.latitude, post.longitude) }))
     .filter((post) => Number.isFinite(post.distanceFromStart))
+    .filter((post) => post.distanceFromStart <= ROUTE_RADIUS)
     .filter((post) => {
       const key = `${post.collectionId}:${String(post.name).toLowerCase()}:${post.latitude.toFixed(5)}:${post.longitude.toFixed(5)}`;
       if (seen.has(key)) return false;
@@ -309,9 +311,9 @@ export default function App() {
       const useful = routeFrom(lat, lon, result.hits, 99);
       const collectionsWithHits = result.reports.filter((r) => r.raw > 0);
       const fallbackUsed = useful.length > 0 && useful.every((post) => post.collectionId === "sikringssoner");
-      setApiStatus(`OGC samlinger: ${result.reports.length}. Samlinger med treff: ${collectionsWithHits.length}. Rå treff: ${result.hits.length}. Brukbare: ${useful.length}. ${fallbackUsed ? "Fallback: sikringssoner." : "Prioriterer lokaliteter/enkeltminner."}`);
+      setApiStatus(`OGC samlinger: ${result.reports.length}. Samlinger med treff: ${collectionsWithHits.length}. Rå treff: ${result.hits.length}. Innen 2 km: ${useful.length}. ${fallbackUsed ? "Fallback: sikringssoner." : "Prioriterer lokaliteter/enkeltminner."}`);
       if (route.length > 0) { startWithRoute(route); return; }
-      setStatus("Ingen OGC-treff i GPS-bounds. Se rapport under.");
+      setStatus("Ingen OGC-treff innen 2 km. Se rapport under.");
     } catch (error) {
       console.log("OGC-test feilet:", error?.message || error);
       setStatus(`OGC-test feilet: ${error?.message || error}`);
@@ -327,12 +329,12 @@ export default function App() {
     return (
       <View style={styles.menu}>
         <Text style={styles.title}>Riksantikvaren OGC-test</Text>
-        <Text style={styles.menuText}>Tester ny OGC API / GeoJSON. Større søkeområde. Sikringssoner brukes bare som fallback.</Text>
+        <Text style={styles.menuText}>Tester OGC API / GeoJSON. Lager opptil 4 poster innen 2 km. Sikringssoner brukes bare som fallback.</Text>
         {loading ? <ActivityIndicator size="large" color="#FFFFFF" /> : null}
         <GpsStatusBox gpsStatus={gpsStatus} onRefresh={refreshGps} onSettings={openSettings} />
         <TouchableOpacity style={styles.mainButton} onPress={startOgcTest} disabled={loading}>
-          <Text style={styles.buttonTitle}>START OGC GEOJSON-TEST</Text>
-          <Text style={styles.buttonText}>GPS → større bbox → prioriter lokaliteter/enkeltminner</Text>
+          <Text style={styles.buttonTitle}>START 4-POSTERS RUTE</Text>
+          <Text style={styles.buttonText}>GPS → større bbox → opptil 4 poster innen 2 km</Text>
         </TouchableOpacity>
       </View>
     );
